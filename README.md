@@ -85,22 +85,81 @@ curl 'http://127.0.0.1:8000/wiki/jobs/JOB_ID/events?after=0'
 
 첫 실행부터 실제 공장 데이터가 필요하지 않다면 [CSV·Markdown으로 첫 위키 만들기](okf-agent/README.md#github에서-받아-처음-실행)로 설치와 출력을 먼저 확인할 수 있습니다.
 
-## 에이전트 실행 순서
+## 보고서 한 건의 실제 실행 순서와 LLM 호출
+
+예를 들어 `REPORT-001`의 PDF 1건을 업로드하면 다음 순서로 실행됩니다. 아래는 **비동기 서비스 설정을 사용하는 경로**이며, 보고서는 서버에서 확정·재사용 승인된 상태라고 가정합니다. 기본 업로드는 미승인 상태로 저장되므로 워커에서 `awaiting_approval`로 보류됩니다.
 
 ```mermaid
 flowchart TD
-  A[보고서 저장·업로드·DB 저장 이벤트] --> B[01 접수·원본 확인]
-  B --> C{서버 업무 승인 확인}
-  C -- 승인 전 --> H[보류 사유 기록]
-  C -- 승인 완료 --> D[02 공통 필드 매핑]
-  D --> E[03 근거·설비·중복·개정 편입 검증]
-  E -- 필수 값 누락·충돌·불확실 --> H
-  E -- 통과 --> F[04 위키 작성]
-  F --> G[05 문장별 검토 메모]
-  G --> I[06 OKF 검사·스냅샷 발행]
+  A[FastAPI 업로드·저장 요청] --> B[원본 저장·영속 작업 등록 / 202 반환]
+  B --> C[워커가 작업 획득·서버 승인 확인]
+  C -- 미승인 --> H[보류 / 기존 위키 유지]
+  C -- 승인 --> D[01 원본 추출·버전·마스터 확인]
+  D --> M[02 필드 매핑 / LLM]
+  M -- 누락·근거 불일치 --> H
+  M -- 통과 --> V[03 코드 검사·편입 심사 / LLM]
+  V -- 보류·충돌 --> H
+  V -- 중복 --> U[추가 편입 없이 종료]
+  V -- 통과 --> W[04 설비 한 대의 인용 작성 / LLM]
+  W --> R[05 해당 설비의 문장 검토 / LLM]
+  R --> N{다음 설비가 있는가?}
+  N -- 예 --> W
+  N -- 아니오 --> P[06 OKF·링크 검사·원본 재확인·스냅샷 발행]
 ```
 
-이미 공통 필드를 갖춘 JSONB 정본은 필드 매핑을 생략하고 편입 검증으로 연결합니다. 정비 사례는 원문·필드별 근거와 함께 보관하며, 과거 사건의 조치·결과를 일반 점검 절차로 자동 재분류하지 않습니다.
+### 실행을 맡는 함수
+
+| 순서 | 실제 호출 경로 | 하는 일 | LLM |
+| --- | --- | --- | --- |
+| 접수 | [async_api.py](okf-agent/clew_okf/interfaces/async_api.py#L171)의 `save_report()` / `upload()` → [WikiService](okf-agent/clew_okf/runtime/service.py#L225) → `ManagedIntake` | 요청 형식·파일 크기·동일 ID/버전의 원본을 확인합니다. 관리형 원본과 작업을 같은 SQLite 트랜잭션으로 등록하고 `job_id`와 `202`를 반환합니다. | 없음 |
+| 실행 준비 | [WikiWorker.run_once()](okf-agent/clew_okf/runtime/worker.py#L72) | 작업을 획득하고 lease·서버 설정·승인 상태를 확인합니다. 관리형 미승인 보고서는 여기서 보류합니다. | 없음 |
+| 01 원본 읽기 | [WikiAgent.map_and_ingest_report()](okf-agent/clew_okf/agent.py#L28) → [admission.map_and_ingest_report()](okf-agent/clew_okf/stages/step_03_admission/admission.py#L190) → `prepare_build()` / `load_raw_report()` | 출력 잠금을 잡고 현행 근거·설비 마스터·원본을 읽습니다. 파일은 텍스트와 위치를 추출하고 원본 fingerprint·승인·개정 정보를 확인합니다. | 없음 |
+| 02 필드 매핑 | [mapping.map_report()](okf-agent/clew_okf/stages/step_02_mapping/mapping.py#L97) | 원문에서 제목·조건·관측·조치·결과·식별자를 추출합니다. 코드는 필수 값·정확한 인용·설비 마스터 연결을 검사하고 `ReportRecord`를 만듭니다. 임의 보완은 허용하지 않습니다. | **호출 ①** |
+| 03 편입 검증 | [admission._admit()](okf-agent/clew_okf/stages/step_03_admission/admission.py#L96) → [evaluate_report()](okf-agent/clew_okf/stages/step_03_admission/admission_review.py#L62) | 코드가 근거 해시·개정 계보·동일 사건의 완전 중복을 먼저 확인합니다. 그다음 모델이 같은 설비의 현재 사례·원문·필드별 근거를 비교합니다. `create`·`new_case`·`attach`만 후속 발행으로 진행하고 판정의 ID·근거도 코드로 검사합니다. | **호출 ②** |
+| 04 위키 작성 | [publish_build()](okf-agent/clew_okf/workflows/compiler.py#L294) → [write_bundle()](okf-agent/clew_okf/stages/step_06_publish/bundle.py#L107) → [curate()](okf-agent/clew_okf/stages/step_04_compose/synthesis.py#L34) | 수용할 보고서 원장을 포함해 번들을 준비합니다. 설비별 작성용 근거에서 인용을 골라 분류하고, 인용문이 원문에 그대로 있는지 코드로 검증합니다. | **호출 ③**, 배치별 |
+| 05 문장 검토 | [review_quotes()](okf-agent/clew_okf/stages/step_05_review/review.py#L26) | 해당 설비의 인용 초안·원문·개정 정보를 별도 요청으로 비교해 조건 누락·개정 혼용·명시된 순서 오류 등을 지적합니다. 유효한 지적에는 근거를 붙이고 기존 문장은 유지합니다. | **호출 ④**, 설비별 |
+| 06 발행 | `validate_bundle()` → `publish_build()`의 원본 재확인 → `_publish()` | OKF 구조·각주·내부 링크를 검사하고 원본·승인·설비·기존 편입 보고서를 다시 확인합니다. 스냅샷이 준비되면 `output/current`를 원자적으로 교체하고 결과를 작업에 기록합니다. | 없음 |
+
+**작성·검토는 `설비 A 작성 → 설비 A 검토 → 설비 B 작성 → 설비 B 검토` 순서입니다.** 현재 구현은 보고서가 속한 설비만 부분 갱신하는 방식이 아니라, 새 스냅샷의 전체 설비를 순회합니다. 새 보고서의 원문과 필드별 근거는 사례 페이지로 보존하고, 사건 당시 조치·결과는 일반 점검 절차 작성 입력에서 제외합니다.
+
+편입 심사와 문장 검토의 효과는 다릅니다. **편입 심사의 보류는 새 사례 반영을 막습니다.** 문장 검토는 지적을 남기는 자문 단계라 `needs_attention`·`partial`·`unavailable` 상태여도 인용 검사를 통과한 위키 초안은 게시할 수 있습니다. 따라서 작업 성공 여부와 `result.build.wiki_reviews`를 함께 확인해야 합니다. 생성 페이지의 상태는 `draft`입니다.
+
+### LLM을 실제로 호출하는 네 곳
+
+네 역할은 같은 `JsonModel` 인터페이스를 사용합니다. 기본 구현의 외부 HTTP 요청은 [ChatCompletionsModel.complete()](okf-agent/clew_okf/providers/llm.py#L63)에서 실행됩니다. 설정을 읽는 `configure_synthesis()`는 어댑터를 생성할 뿐 모델을 호출하지 않습니다. API 접수와 워커의 작업 획득도 모델 호출이 아닙니다.
+
+| 역할 | `provider.complete()` 호출 위치 | 모델에 전달하는 핵심 입력 | 모델 설정 |
+| --- | --- | --- | --- |
+| ① 필드 매핑 | [mapping.py:140](okf-agent/clew_okf/stages/step_02_mapping/mapping.py#L140) | 원문 블록·위치·개정, 서버 식별 메타데이터, 설비 마스터 | `admission.mapping.model` |
+| ② 편입 심사 | [admission_review.py:106](okf-agent/clew_okf/stages/step_03_admission/admission_review.py#L106) | 정규화 보고서, 같은 설비의 현재 사례, 원문과 필드별 근거 | `admission.review_model` |
+| ③ 인용 작성 | [synthesis.py:64](okf-agent/clew_okf/stages/step_04_compose/synthesis.py#L64) | 해당 설비 키와 작성 대상 근거의 발췌 배치 | `synthesis.model` |
+| ④ 문장 검토 | [review.py:64](okf-agent/clew_okf/stages/step_05_review/review.py#L64) | 해당 설비의 순서가 있는 초안, 원문 발췌·출처·개정, 검토 범위 | `synthesis.review_model` |
+
+역할별 모델을 생략하면 `synthesis.model`을 사용하며 엔드포인트·인증 설정은 공유합니다. 독립 검토는 별도 프롬프트·요청으로 수행한다는 뜻이며, 기본적으로 같은 모델을 사용할 수 있습니다.
+
+### 한 건당 호출 횟수와 중단되는 경우
+
+**호출 위치는 네 곳이지만 한 건당 호출 횟수가 4회로 고정되지는 않습니다.** 정상적인 새 원문 보고서가 수용되고 새 스냅샷을 만드는 경우, 재시도를 제외한 호출 수는 다음과 같습니다.
+
+```text
+매핑 1회 + 편입 심사 1회
++ 모든 설비의 작성 배치 수 합계
++ 문장 검토를 실행한 설비 수
+```
+
+작성은 원문을 최대 4,000자씩 240자 겹치게 나누고, 발췌 최대 4개를 한 요청으로 보냅니다. 문장 검토는 `synthesis.review`가 켜져 있고 선택된 인용이 있는 설비마다 1회입니다. 설비 1대·작성 1배치·인용 있음·검토 활성화라면 4회이고, 같은 조건의 설비가 2대면 6회입니다. 자료가 길거나 워커가 작업을 재시도하면 호출이 늘 수 있습니다.
+
+| 경우 | 실제 경로 |
+| --- | --- |
+| 새 관리형 보고서가 미승인 | 워커에서 `held`·`awaiting_approval`. 모델 호출 0회. |
+| 이미 편입된 동일 ID·버전·원본이 그대로인 재요청 | 원본·근거 재확인 후 `unchanged`. 매핑·편입 심사·위키 작성 생략. |
+| 공통 필드를 갖춘 DB JSONB 정본 | `ingest_report()`로 진입해 ② 편입 검사부터 실행. ① 매핑 생략. |
+| 매핑 후 필수 항목·근거가 부족 | `hold`. ②~④를 실행하지 않음. |
+| 완전 중복·개정 충돌을 코드가 먼저 발견 | ② 편입 모델 호출 전에 종료. 원문 경로에서는 ① 매핑이 이미 실행됐을 수 있음. |
+| 모델이 중복 또는 보류로 판정 | ②에서 종료하고 ③~④ 및 새 사례 발행 생략. |
+| 기존 스냅샷 재사용 / 인용 없음 / `review: false` | 작성·검토 일부 또는 전체 생략. 인용 없음은 `no_claims`로 기록. |
+
+DB에 저장한 원문은 주 DB 커밋 후 `report_saved(..., source="database")`로 등록하면 동일한 매핑 경로를 사용합니다. `source="canonical"`은 서버에서 읽은 JSONB 정본을 편입 심사로 연결합니다. 이 경로에서는 승인 상태를 DB 로더가 확인합니다. 입력·비교 후보 한도 초과도 중간 단계의 보류 사유가 될 수 있으며, 이후 모델 요청과 발행은 진행하지 않습니다.
 
 ## 프로젝트 구조
 
