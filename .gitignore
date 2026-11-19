@@ -1,0 +1,34 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+.env
+.env.*
+!.env.example
+.DS_Store
+originals/
+/output/
+/okf-agent/output/
+clew-demo.*/
+
+# Persistent local service state includes report originals and job results.
+service-state/
+
+okf.service.local.yaml
+
+# Local evaluation originals, model traces, fixtures and process logs.
+/okf-agent/evaluations/
+# Local research exports are kept separately from the published documentation.
+/exa-results/
+.pytest_cache/
+
+# Main CLEW product planning remains local to the parent project.
+/docs/PROJECT.md
+/docs/DECISIONS.md
+/docs/INFRASTRUCTURE.md
+/docs/SOURCES.md
+
+/docs/assets/clew-deployment-plan.png

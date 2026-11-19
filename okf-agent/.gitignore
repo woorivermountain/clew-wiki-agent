@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+okf.local.yaml
+output/
+
+# Persistent local service state includes report originals and job results.
+service-state/
+
+okf.service.local.yaml

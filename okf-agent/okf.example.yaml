@@ -1,0 +1,60 @@
+title: CLEW 설비 위키
+output: ./output
+
+# 설비 마스터 CSV와 PostgreSQL equipment 설정 중 하나를 선택합니다.
+equipment_csv: ./equipment.csv
+
+documents:
+  root: ./originals
+  kordoc: kordoc
+  scope_from_path: false  # 허용된 설비 키가 폴더 경로의 처음에 있는 경우 true
+  timeout_seconds: 120
+  max_bytes: 67108864
+  include_only_listed: true  # 목록에 지정한 원본만 수집
+  files:
+    C-2100-manual.pdf:
+      equipment_ids: ["ULSAN/C-2100"]
+      revision: "Rev.3"
+      type: Maintenance Procedure
+      # source_uri: https://documents.example.com/controlled/SOP-042/rev-3
+      # ocr: true  # 스캔본 PDF 등에만 지정
+
+# PostgreSQL을 사용할 때 환경 변수로 접속 문자열을 설정합니다.
+# postgres:
+#   name: clew
+#   dsn_env: CLEW_POSTGRES_DSN
+#   tables:
+#     - public.equipment_master
+#     - public.sensor_tags
+#   equipment:
+#     table: public.equipment_master
+#     columns:
+#       equipment_id: asset_no
+#       name: asset_name
+#       plant_id: plant_code
+#       process_id: process_code
+#       model: model_name
+#       aliases: aliases
+#     max_rows: 10000
+#   records:
+#     - table: wiki.approved_maintenance_cases
+#       id_column: case_id
+#       title_column: title
+#       equipment_column: asset_no
+#       plant_column: plant_code
+#       revision_column: revision
+#       # filters: {lifecycle: current}  # 실제 컬럼의 일치 조건
+#       columns: [symptom, observation, action_taken]
+#       max_rows: 1000
+# database_links:
+#   postgres:clew/public/sensor_tags: ["ULSAN/C-2100"]
+
+# quotes 작성과 문장별 근거 검토를 사용할 모델 엔드포인트를 지정합니다.
+# synthesis:
+#   endpoint: http://127.0.0.1:11434/v1/chat/completions
+#   model: your-local-model
+#   review: true  # 기본값. false는 검토 메모 없는 quotes 결과
+#   # review_model: separate-review-model  # 생략하면 같은 모델에 별도 요청
+#   # review_input_chars: 24000            # 검토 요청의 원문 문자 예산
+#   # api_key_env: CLEW_MODEL_API_KEY
+#   timeout_seconds: 90

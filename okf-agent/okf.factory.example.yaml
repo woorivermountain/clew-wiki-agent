@@ -1,0 +1,79 @@
+title: CLEW 제조 위키
+output: ./output
+
+# DB 이름과 컬럼명은 예시입니다. 실제 PostgreSQL 테이블·뷰 이름으로 바꾸세요.
+postgres:
+  name: clew_factory
+  dsn_env: CLEW_POSTGRES_DSN
+  tables:
+    - wiki.equipment_master
+    - wiki.current_maintenance
+  equipment:
+    table: wiki.equipment_master
+    columns:
+      equipment_id: asset_no
+      name: asset_name
+      plant_id: plant_code
+      process_id: process_code
+      # model: model_name
+    max_rows: 10000
+  # 아래는 직접 수집할 현행 절차 뷰입니다. admission.reports의 정본 보고서 테이블은 넣지 마세요.
+  records:
+    - table: wiki.current_maintenance
+      id_column: wiki_record_id
+      title_column: record_title
+      equipment_column: asset_no
+      plant_column: plant_code
+      revision_column: revision_code
+      # 원시 운영 기록이면 아래 설정으로 일반 절차 인용에서 제외하고 심사·검토 근거로 유지합니다.
+      # synthesize: false
+      filters:
+        lifecycle: current
+      columns:
+        - lifecycle
+        - effective_on
+        - inspection_condition
+        - inspection_steps
+        - acceptance_criteria
+      max_rows: 1000
+
+documents:
+  root: ./originals
+  kordoc: kordoc
+  scope_from_path: true
+  include_only_listed: true
+  files:
+    # 공용 폴더의 한글 원본은 적용 설비를 직접 지정합니다.
+    "공용/압축기_점검매뉴얼.hwpx":
+      equipment_ids: ["ULSAN/C-2100"]
+      revision: "R2026.11"
+      type: Maintenance Procedure
+      # source_uri: https://dms.example.internal/docs/COMP-SOP/revisions/R2026.11
+    # 폴더의 ULSAN/EQ-02를 설비 키로 사용합니다.
+    "ULSAN/EQ-02/비전검사기_작업표준.pdf":
+      revision: "R2026.11"
+      type: Maintenance Procedure
+      # ocr: true  # 텍스트가 없는 스캔본을 OCR로 읽을 때 사용합니다.
+
+# 인용 작성과 검토를 켤 때 실행 환경에서 허용된 모델과 키를 연결하세요.
+# synthesis:
+#   endpoint: https://llm-gateway.example.internal/v1/chat/completions
+#   model: your-approved-model
+#   api_key_env: CLEW_MODEL_API_KEY
+#   review: true
+#   timeout_seconds: 90
+
+# 보고서 한 건의 편입 심사를 사용할 때 아래 admission과 위 synthesis를 함께 켜세요.
+# 보고서 내용은 서버의 JSONB 정본에서 조회합니다. API 본문은 {"version": 1}만 받습니다.
+# wiki.approved_reports를 postgres.records에 중복 지정하면 빌드를 중단합니다.
+# 상세 스키마·근거 생성: ../docs/보고서-위키-편입.md
+# admission:
+#   reports:
+#     table: wiki.approved_reports
+#     id_column: report_id
+#     version_column: version
+#     payload_column: payload
+#     # 생략하면 postgres.dsn_env를 사용합니다. 별도 읽기 전용 계정도 지정할 수 있습니다.
+#     # dsn_env: CLEW_REPORT_POSTGRES_DSN
+#   max_candidates: 32  # 같은 설비의 현재 사례 전체를 비교하며, 한도를 넘으면 보류합니다.
+#   # review_model: your-approved-admission-model  # synthesis와 같은 엔드포인트 사용
