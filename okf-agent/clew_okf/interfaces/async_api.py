@@ -13,7 +13,9 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
 from clew_okf.stages.step_01_ingest.managed_intake import InputConflictError, InputNotFoundError, InputValidationError, submission_descriptor
+from clew_okf.interfaces.agent_runs import create_agent_runs_router
 from clew_okf.interfaces.studio import create_studio_router
+from clew_okf.interfaces.chat_lookup import create_chat_lookup_router
 from clew_okf.domain.reports import Identifier, PositiveVersion, ReportIdentifier
 from clew_okf.interfaces.api import WikiReleaseResponse, _get_approved_release
 from clew_okf.runtime.service import WikiService
@@ -121,6 +123,8 @@ def create_service_router(service: WikiService, *, prefix: str = "/wiki", approv
     router = APIRouter(prefix=prefix, tags=["wiki-jobs"], dependencies=dependencies or [])
 
     router.include_router(create_studio_router(service.config_path, jobs_available=True))
+    router.include_router(create_chat_lookup_router(service.config_path))
+    router.include_router(create_agent_runs_router(service.state_dir))
 
     @router.get("/release", response_model=WikiReleaseResponse)
     def release(response: Response) -> dict:

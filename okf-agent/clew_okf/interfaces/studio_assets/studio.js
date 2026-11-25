@@ -3,7 +3,7 @@
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 const root = location.pathname.replace(/\/studio\/?$/, "");
-const modes = ["lineage", "document", "graph", "jobs"];
+const modes = ["lineage", "document", "graph", "jobs", "agent-runs"];
 const claimSections = new Set(["데이터 설명", "주의 사항", "점검 절차", "적용 조건"]);
 const assetLabels = {
   equipment_id: "설비 ID", name: "설비명", plant_id: "공장 ID", process_id: "공정 ID",
@@ -1071,14 +1071,30 @@ function findingCard(finding) {
   return card;
 }
 
+const wikiStages = {
+  queued: ["작업 접수"],
+  running: ["실행 시작"],
+  starting: ["에이전트 시작", "runtime/worker.py::WikiWorker.run_once"],
+  scanning_database: ["DB 살펴보기", "runtime/worker.py::WikiWorker._bootstrap"],
+  building_initial_wiki: ["초기 위키 구성", "runtime/worker.py::WikiWorker._bootstrap"],
+  queueing_existing_reports: ["기존 보고서 편입 등록", "runtime/worker.py::WikiWorker._bootstrap"],
+  loading_sources: ["원문과 설비 읽기", "workflows/compiler.py::_load_sources"],
+  reading_report: ["보고서 원본 확인", "stages/step_01_ingest/raw_report_store.py::load_raw_report"],
+  extracting_document: ["업로드 문서 읽기", "stages/step_01_ingest/raw_report_store.py::_load_file"],
+  checking_admitted_reports: ["편입 근거 확인", "workflows/compiler.py::publish_build"],
+  mapping_fields: ["보고서 필드 매핑", "stages/step_02_mapping/mapping.py::_map_report"],
+  validating_evidence: ["원문 근거 검증", "stages/step_03_admission/admission.py::_admit"],
+  reviewing_admission: ["편입 여부 검토", "stages/step_03_admission/admission_review.py::evaluate_report"],
+  generating_wiki: ["위키 작성·검토", "workflows/compiler.py::publish_build"],
+  validating_wiki: ["Wiki 구조·출처 검증", "stages/step_06_publish/bundle.py::validate_bundle"],
+  publishing_wiki: ["스냅샷 저장", "workflows/compiler.py::_publish"],
+  succeeded: ["작업 완료"],
+  held: ["반영 보류"],
+  failed: ["작업 실패"],
+};
+
 function stageLabel(stage) {
-  return ({
-    queued: "작업 접수", running: "실행 시작", starting: "에이전트 시작",
-    scanning_database: "DB 살펴보기", loading_sources: "원문과 설비 읽기",
-    checking_admitted_reports: "편입 근거 확인", mapping_fields: "보고서 필드 매핑",
-    validating_evidence: "원문 근거 검증", generating_wiki: "위키 작성·검토",
-    publishing_wiki: "스냅샷 저장", succeeded: "작업 완료", held: "반영 보류", failed: "작업 실패",
-  })[stage] || "처리 단계";
+  return wikiStages[stage]?.[0] || stage || "처리 단계";
 }
 
 async function showJobEvents(job, panel) {
@@ -1097,6 +1113,8 @@ async function showJobEvents(job, panel) {
       if (event.message && event.message.length && /[가-힣]/.test(event.message)) {
         detail.append(node("span", "", event.message));
       }
+      const source = wikiStages[event.stage]?.[1];
+      if (source) detail.append(node("code", "run-source", "okf-agent/clew_okf/" + source));
       row.append(detail, node("time", "", date(event.created_at)));
       list.append(row);
     }
@@ -1107,14 +1125,15 @@ async function showJobEvents(job, panel) {
   }
 }
 
-function renderJobs() {
-  const main = node("section", "wide-view");
-  main.append(node("h1", "", "작업 기록"), node("p", "view-intro", "위키 생성과 보고서 편입의 처리 상태를 확인합니다."));
+function renderJobs(target = $("#view"), {embedded = false} = {}) {
+  const main = node("section", embedded ? "runs-wiki-jobs" : "wide-view");
+  if (!embedded) main.append(node("h1", "", "작업 기록"), node("p", "view-intro", "위키 생성과 보고서 편입의 처리 상태를 확인합니다."));
   if (!state.overview?.jobs_available || state.jobError || state.jobs === null) {
-    const explanation = !state.overview?.jobs_available ? "이 서버에서는 비동기 작업 조회를 연결할 수 없습니다." :
+    const explanation = !state.overview ? state.overviewError ? "서버에서 작업 조회 설정을 불러오지 못했습니다." : "작업 조회 설정을 확인하는 중입니다." :
+      !state.overview.jobs_available ? "이 서버에서는 비동기 작업 조회를 연결할 수 없습니다." :
       state.jobError ? "작업 기록을 불러오지 못했습니다. 새로고침을 눌러 다시 확인하세요." : "작업 기록을 불러오는 중입니다.";
     main.append(node("p", "empty-copy", explanation));
-    $("#view").replaceChildren(main);
+    target.replaceChildren(main);
     return;
   }
   const filters = node("div", "job-filters");
@@ -1122,14 +1141,15 @@ function renderJobs() {
   for (const [value, label] of [["all", "전체 " + state.jobs.length], ["held", "보류 " + held]]) {
     const entry = button(label, "filter-button", () => {
       state.jobFilter = value;
-      renderJobs();
-      [...$$(".job-filters button")].find((item) => item.dataset.filter === value)?.focus();
+      renderJobs(target, {embedded});
+      [...target.querySelectorAll(".job-filters button")].find((item) => item.dataset.filter === value)?.focus();
     });
     entry.dataset.filter = value;
     entry.setAttribute("aria-pressed", String(state.jobFilter === value));
     filters.append(entry);
   }
-  filters.append(button("작업 상세", "filter-button mobile-inspect-link", () => scrollToItem($(".inspector")), "panel"));
+  if (embedded) filters.append(button("작업 기록 열기", "text-button", () => changeMode("jobs"), "arrow"));
+  else filters.append(button("작업 상세", "filter-button mobile-inspect-link", () => scrollToItem($(".inspector")), "panel"));
   main.append(filters);
   const list = node("div", "job-list");
   const currentJobs = state.jobs.filter((job) => state.jobFilter === "all" || job.status === state.jobFilter);
@@ -1147,7 +1167,7 @@ function renderJobs() {
         state.expandedJobs.delete(job.id);
         if (state.selectedJob === job.id) state.selectedJob = [...state.expandedJobs].at(-1) || null;
       }
-      renderInspector();
+      if (!embedded) renderInspector();
     });
     const title = node("span", "job-title");
     title.append(icon("chevron"), node("span", "", jobName(job)));
@@ -1176,7 +1196,7 @@ function renderJobs() {
     list.append(item);
   }
   main.append(list);
-  $("#view").replaceChildren(main);
+  target.replaceChildren(main);
   currentJobs.forEach((job, index) => {
     if (state.expandedJobs.has(job.id)) void showJobEvents(job, list.children[index].querySelector(".job-timeline"));
   });
@@ -1192,6 +1212,7 @@ function render() {
   if (state.mode === "lineage") renderLineage();
   else if (state.mode === "graph") renderGraph();
   else if (state.mode === "jobs") renderJobs();
+  else if (state.mode === "agent-runs") agentRuns.render($("#view"));
   else renderDocument();
 }
 
@@ -1205,11 +1226,14 @@ async function fetchJobs() {
     if (changed && state.mode === "jobs") {
       renderJobs();
       renderInspector();
+    } else if (changed && state.mode === "agent-runs") {
+      agentRuns.updateJobs();
     }
     renderChrome();
   } catch {
     state.jobError = true;
     if (state.mode === "jobs") renderJobs();
+    if (state.mode === "agent-runs") agentRuns.updateJobs();
   }
 }
 
@@ -1235,7 +1259,7 @@ async function setPage(path, {anchor = null, recovering = false} = {}) {
     if (state.inspector !== "preview" || !state.split) state.inspector = reviewFor(page) ? "review" : "evidence";
     render();
     const top = anchor ? 0 : state.scrollByPage.get(state.view + ":" + path) || 0;
-    scrollPrimary(top);
+    if (state.mode !== "agent-runs") scrollPrimary(top);
     if (anchor) focusEvidence(anchor);
   } catch (error) {
     if (id !== state.pageRequest) return;
@@ -1254,6 +1278,7 @@ async function loadOverview({recovering = false} = {}) {
   const id = ++state.overviewRequest;
   ++state.pageRequest;
   $("#refresh").disabled = true;
+  state.overviewError = false;
   showNotice();
   try {
     const data = await request("/studio/overview", {view: state.view});
@@ -1279,8 +1304,10 @@ async function loadOverview({recovering = false} = {}) {
     }
   } catch {
     if (id !== state.overviewRequest) return;
-    showNotice("FastAPI에서 위키를 불러오지 못했습니다.");
-    if (!state.page) renderEmpty("위키 조회 실패", "설정된 위키와 서버 상태를 확인하세요.",
+    state.overviewError = true;
+    if (state.mode === "agent-runs") agentRuns.updateJobs();
+    else showNotice("FastAPI에서 위키를 불러오지 못했습니다.");
+    if (!state.page && state.mode !== "agent-runs") renderEmpty("위키 조회 실패", "설정된 위키와 서버 상태를 확인하세요.",
       button("다시 조회", "text-button", () => loadOverview(), "refresh"));
   } finally {
     if (id === state.overviewRequest) $("#refresh").disabled = false;
@@ -1291,6 +1318,7 @@ function navigate(path, {mode = "document", anchor = null} = {}) {
   if (!state.documents.has(path)) return;
   const same = state.page?.path === path && !anchor;
   state.mode = mode;
+  if (mode === "agent-runs") showNotice();
   state.path = path;
   setExplorer(false);
   if (same) {
@@ -1316,6 +1344,7 @@ function changeMode(mode) {
   render();
   scrollPrimary(mode === "document" ? state.scrollByPage.get(scrollKey) || 0 : 0);
   if (mode === "jobs") void fetchJobs();
+  if (mode === "agent-runs") agentRuns.refresh();
 }
 
 function changeView(view) {
@@ -1331,6 +1360,14 @@ function changeView(view) {
   void loadOverview();
 }
 
+const agentRuns = window.ClewRuns.create({
+  root, node, icon, button, chip, formatDate: date,
+  renderJobs: (target) => renderJobs(target, {embedded: true}),
+  fetchJobs: () => state.overview ? fetchJobs() : loadOverview(),
+  isActive: () => state.mode === "agent-runs",
+  wikiPageUrl: (path, snapshot) => snapshot && snapshot === state.overview?.approved?.snapshot ?
+    "#" + new URLSearchParams({view: "approved", screen: "document", page: path}) : null,
+});
 const contextDock = window.ClewContext.create($("#context-dock"), {
   getPage: getSnapshotPage,
   getDocument: (path) => state.documents.get(path),
@@ -1357,6 +1394,7 @@ const palette = window.ClewPalette.create({
     {id: "document", title: "문서 보기", action: () => changeMode("document")},
     {id: "graph", title: "연결 그래프 보기", action: () => changeMode("graph")},
     {id: "jobs", title: "작업 기록 보기", action: () => changeMode("jobs")},
+    {id: "agent-runs", title: "에이전트 작동 보기", action: () => changeMode("agent-runs")},
     {id: "approved", title: "운영 승인본 보기", action: () => changeView("approved")},
     {id: "draft", title: "검토용 초안 보기", action: () => changeView("draft")},
     {id: "refresh", title: "위키 새로고침", action: () => loadOverview()},
@@ -1379,7 +1417,7 @@ $("#search").addEventListener("input", () => {
   renderTree();
 });
 $("#snapshot-view").addEventListener("change", (event) => changeView(event.target.value));
-$("#refresh").addEventListener("click", () => loadOverview());
+$("#refresh").addEventListener("click", () => state.mode === "agent-runs" ? agentRuns.refresh() : loadOverview());
 $("#explorer-toggle").addEventListener("click", (event) => setExplorer(event.currentTarget.getAttribute("aria-expanded") !== "true", true));
 $("#explorer-close").addEventListener("click", () => setExplorer(false, true));
 for (const tab of $$(".nav-tab")) tab.addEventListener("click", () => changeMode(tab.dataset.mode));
@@ -1398,6 +1436,12 @@ document.addEventListener("keydown", (event) => {
 window.addEventListener("popstate", () => {
   const priorView = state.view;
   readLocation();
+  if (state.mode === "agent-runs") {
+    showNotice();
+    render();
+    agentRuns.refresh();
+    if (priorView === state.view) return;
+  }
   if (priorView !== state.view) {
     contextDock.close({clear: true, restoreFocus: false});
     ++state.splitRequest;
@@ -1411,8 +1455,14 @@ window.addEventListener("popstate", () => {
   else void loadOverview();
 });
 setInterval(() => { if (!document.hidden && state.mode === "jobs") void fetchJobs(); }, 12000);
+setInterval(() => { if (!document.hidden && state.mode === "agent-runs") agentRuns.poll(); }, 5000);
 readLocation();
-renderChrome();
-renderTree();
-renderEmpty("위키를 불러오는 중", "설정된 스냅샷을 확인하고 있습니다.");
+if (state.mode === "agent-runs") {
+  render();
+  agentRuns.refresh();
+} else {
+  renderChrome();
+  renderTree();
+  renderEmpty("위키를 불러오는 중", "설정된 스냅샷을 확인하고 있습니다.");
+}
 void loadOverview();

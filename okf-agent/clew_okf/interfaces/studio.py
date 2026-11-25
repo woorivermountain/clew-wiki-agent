@@ -30,6 +30,7 @@ _ASSETS = Path(__file__).with_name("studio_assets")
 _ASSET_TYPES = {
     "studio.css": "text/css",
     "studio.js": "text/javascript",
+    "studio_runs.js": "text/javascript",
     "studio_graph.js": "text/javascript",
     "studio_lineage.js": "text/javascript",
     "studio_context.js": "text/javascript",

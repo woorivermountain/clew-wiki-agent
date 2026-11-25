@@ -86,6 +86,23 @@ curl 'http://127.0.0.1:8000/wiki/jobs/JOB_ID/events?after=0'
 
 첫 실행부터 실제 공장 데이터가 필요하지 않다면 [CSV·Markdown으로 첫 위키 만들기](okf-agent/README.md#github에서-받아-처음-실행)로 설치와 출력을 먼저 확인할 수 있습니다.
 
+### CLEW 채팅과 에이전트 작동 화면
+
+`service` 블록을 사용하는 관리 API의 `/wiki/studio`에서 **작업 기록** 옆 **에이전트 작동**을 엽니다. CLEW 세션별로 질문과 응답, 코드 위치, 룰 분기, 에이전트와 도구 호출, Wiki 사용 여부와 조회 결과가 시간순으로 표시됩니다. Wiki 작업 내역에서는 빌드·편입 워커가 남긴 단계와 보류 사유를 확인합니다.
+
+| 환경 변수 | 설정 위치와 용도 |
+| --- | --- |
+| `CLEW_MONITOR_INGEST_TOKEN` | 관리 API와 CLEW BE에 같은 수집용 토큰을 설정합니다. |
+| `CLEW_MONITOR_ADMIN_TOKEN` | 관리 API에 운영자용 토큰을 설정합니다. Studio의 에이전트 작동 탭에서 이 토큰으로 실행 기록을 엽니다. |
+| `CLEW_WIKI_LOOKUP_TOKEN` | 관리 API와 CLEW BE에 같은 Wiki 조회용 토큰을 설정합니다. |
+| `CLEW_MONITOR_URL`, `CLEW_WIKI_URL` | CLEW BE가 접근 가능한 관리 API 주소를 `/wiki` 앞까지 설정합니다. 한 관리 서버를 쓰면 두 주소가 같습니다. |
+| `CLEW_MONITOR_INCLUDE_CONTENT` | CLEW BE에서 `true`로 설정하면 질문과 최종 응답 본문이 기록됩니다. 기본값은 `false`입니다. |
+| `CLEW_WIKI_STUDIO_URL` | CLEW BE에서 사용자의 브라우저가 열 수 있는 전체 Studio 주소를 설정합니다. |
+
+예를 들어 CLEW BE가 8000번 포트를 사용한다면 관리 API는 위 실행 명령의 포트를 `8002`로 바꿔 시작할 수 있습니다. CLEW 채팅에서 `위키 P1`처럼 등록 설비의 코드나 이름을 입력합니다. 관리 API는 `release-approve`로 승인된 스냅샷에서 같은 플랜트의 설비 문서와 연결 근거를 조회합니다. 실행 상세에 스냅샷 ID와 문서 경로가 표시됩니다.
+
+실행 기록은 관리 API의 `service.state_dir/agent-runs.sqlite`에 저장됩니다. 조회할 수 있는 범위는 최근 7일, 최대 5,000건입니다. CLEW BE는 관리 API 장애 중에도 채팅을 처리하며, 장애 시 전송에 실패한 기록은 복구 후 재전송되지 않습니다.
+
 ## 보고서 한 건의 실제 실행 순서와 LLM 호출
 
 예를 들어 `REPORT-001`의 PDF 1건을 업로드하면 다음 순서로 실행됩니다. 아래는 **비동기 서비스 설정을 사용하는 경로**이며, 보고서는 서버에서 확정·재사용 승인된 상태라고 가정합니다. 기본 업로드는 미승인 상태로 저장되므로 워커에서 `awaiting_approval`로 보류됩니다.

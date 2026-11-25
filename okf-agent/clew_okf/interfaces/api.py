@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from clew_okf import WikiAgent
 from clew_okf.domain.errors import RequiredEvidenceMissingError
+from clew_okf.interfaces.chat_lookup import create_chat_lookup_router
 from clew_okf.workflows.compiler import BuildInProgressError
 from clew_okf.workflows.release import ReleaseNotApprovedError, read_approved_release
 from clew_okf.interfaces.studio import create_studio_router
@@ -75,6 +76,7 @@ def create_router(agent: WikiAgent, *, prefix: str = "/wiki") -> APIRouter:
     router = APIRouter(prefix=prefix, tags=["wiki"])
 
     router.include_router(create_studio_router(agent.config_path, jobs_available=False))
+    router.include_router(create_chat_lookup_router(agent.config_path))
 
     @router.get("/release", response_model=WikiReleaseResponse)
     def release(response: Response) -> dict:
