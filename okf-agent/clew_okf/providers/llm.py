@@ -50,6 +50,11 @@ class ChatCompletionsModel:
         if key_env is not None:
             if not isinstance(key_env, str) or not key_env.isidentifier() or not (key := os.environ.get(key_env)):
                 raise ValueError("synthesis의 api_key_env에 해당하는 환경 변수를 설정하세요.")
+        if key is not None and (not key.isascii() or any(not 33 <= ord(ch) <= 126 for ch in key)):
+            raise ValueError("API 키는 공백 없이 발급된 키 문자열만 입력하세요.")
+        json_mode = config.get("json_mode", False)
+        if type(json_mode) is not bool:
+            raise ValueError("synthesis.json_mode는 true 또는 false여야 합니다.")
         timeout = config.get("timeout_seconds", 90)
         if type(timeout) is not int or timeout <= 0:
             raise ValueError("synthesis timeout_seconds는 양의 정수여야 합니다.")
@@ -58,6 +63,7 @@ class ChatCompletionsModel:
         self._model = model
         self._key = key
         self._timeout = timeout
+        self._json_mode = json_mode
         self._opener = build_opener(ProxyHandler({}), _NoRedirect())
 
     def complete(
@@ -70,9 +76,12 @@ class ChatCompletionsModel:
         headers = {"Content-Type": "application/json"}
         if self._key:
             headers["Authorization"] = f"Bearer {self._key}"
+        body = {"model": model or self._model, "messages": messages}
+        if self._json_mode:
+            body["response_format"] = {"type": "json_object"}
         request = Request(
             self._endpoint,
-            data=json.dumps({"model": model or self._model, "messages": messages}).encode("utf-8"),
+            data=json.dumps(body).encode("utf-8"),
             headers=headers,
             method="POST",
         )
@@ -86,6 +95,8 @@ class ChatCompletionsModel:
                 if isinstance(remaining, int) and remaining > 0:
                     raise HTTPException("Incomplete response")
             content = json.loads(raw)["choices"][0]["message"]["content"]
+            if isinstance(content, str) and not content.strip():
+                raise RuntimeError("모델이 빈 본문을 반환했습니다.")
             result = json.loads(content)
             if not isinstance(result, dict):
                 raise ValueError

@@ -98,6 +98,56 @@ synthesis:
 
 `review`를 생략하면 문장별 검토가 켜집니다. 인용 작성 결과만 보려면 `review: false`를 설정합니다. 모델을 교체하려면 `endpoint`와 `model`을 바꿉니다. 같은 Chat Completions 엔드포인트에서 검토 모델만 바꾸려면 `review_model`을 지정합니다. 다른 호출 형식은 [`providers/llm.py`](clew_okf/providers/llm.py)의 `JsonModel` 인터페이스를 구현하고 `configure_synthesis`에서 연결합니다. `review_input_chars`의 기본값은 24000입니다. 입력 일부만 검토한 페이지는 검토 범위를 표시합니다. 기존 `workflow: reviewed` 설정에도 같은 인용 작성과 문장별 검토가 적용됩니다.
 
+### 조건과 각주를 함께 인용
+
+에이전트 패키지 버전은 0.2.0입니다. OKF 문서의 규격은 0.2입니다. 바뀐 기능과 검증 내역은 [변경 기록](CHANGELOG.md)에 있습니다.
+
+표 행과 적용 조건이 떨어져 있으면 `synthesis.structured_evidence`에 연결 관계를 지정합니다. 아래는 가상 원문을 사용한 설정 예시입니다. 실제 설정에서는 파서가 읽은 정확한 원문 문자열을 씁니다. 각 문자열은 지정한 원문 블록에 한 번만 나와야 합니다.
+
+```yaml
+synthesis:
+  endpoint: http://127.0.0.1:11434/v1/chat/completions
+  model: your-local-model
+  review: true
+  structured_evidence:
+    - source_key: "docs:training-pump-manual.pdf"
+      protected_locators: ["page 8", "page 9"]
+      groups:
+        - id: inspection-training-pump
+          label: "교육용 펌프 점검 조건"
+          equipment_ids: ["DEMO/P-101"]
+          required: true
+          spans:
+            - locator: "page 8"
+              quote: "Example maintenance schedule"
+            - locator: "page 8"
+              quote: "| Task | Interval |"
+            - locator: "page 8"
+              quote: "| Example inspection | every 250 hours (1) |"
+            - locator: "page 9"
+              quote: "(1) Applies to the training unit only."
+```
+
+- 보호한 블록은 해당 문서에 연결된 모든 설비의 개별 인용 후보에서 제외합니다. 묶음을 지정한 설비에는 검증된 근거 묶음을 보냅니다. 해당 원문의 참고 페이지와 각주 위치는 유지됩니다.
+- 모델이 묶음의 일부를 고르면 그 묶음의 원문 구절을 모두 함께 기록합니다. 위 예에서는 점검 주기와 적용 대상이 각각의 원문 위치를 보존합니다. 표 머리글, 단위, 모델 행과 재질 표기도 각 구절로 지정할 수 있습니다.
+- `required: true`는 목록에 지정한 설비의 위키 본문에 반드시 들어갈 묶음에 붙입니다. 생략하면 모델이 채택할 수 있는 선택 묶음입니다.
+- 필수 묶음이 통째로 빠지면 전체 빌드가 보류됩니다. 보류 결과에서 설비 키, 빠진 묶음, 해당 원문 문서와 위치, 각 조건의 원문 구절을 확인할 수 있습니다. 기존 `output/current`와 승인본은 계속 사용할 수 있습니다.
+- 원문 구절, 적용 설비, 페이지 위치를 검증할 수 없으면 빌드가 멈추고 기존 `current`를 유지합니다. 구성·재질을 확인하기 어려운 페이지는 보호 목록에 넣고 본문 작성 후보에서 제외할 수 있습니다.
+- 빌드 결과의 `selected_groups`는 본문에 실린 묶음 수입니다. `selected_quotes`는 본문에 실린 원문 구절 수로, 하나의 묶음에 여러 구절이 들어갈 수 있습니다.
+- 문서 읽기에는 현재 설정한 파서를 그대로 사용합니다. 관련 각주와 모델 행을 확인한 다음 설정에 넣습니다. `structured_evidence`가 없는 설정은 기존 작성 흐름을 사용합니다.
+
+#### 필수 근거가 빠졌을 때
+
+`findings`의 `code`가 `required_evidence_missing`이면 `equipment_key`와 `label`에서 빠진 설비와 조건을 확인합니다. `evidence`의 `source_key`, `source_title`, `revision`, `locator`, `quote`에서 원문 문서, 개정, 위치와 실제 구절을 확인합니다. 위 예에서 묶음이 누락되면 8쪽의 점검 주기와 9쪽의 적용 대상이 함께 표시됩니다.
+
+| 실행 경로 | 보류 결과 확인 위치 |
+| --- | --- |
+| Python `WikiAgent.run()` | `clew_okf.RequiredEvidenceMissingError`의 `findings` |
+| `clew-okf build --config okf.local.yaml` | JSON의 `status: hold`, `findings`와 종료 코드 `1` |
+| 동기 `POST /wiki/build` | HTTP `409`의 `detail.status: hold`와 `detail.findings` |
+| 동기 보고서 편입 | 응답의 `status: hold`와 `findings` |
+| 비동기 `GET /wiki/jobs/{id}` | 작업의 `status: held`, `hold_reasons`와 `result.findings` |
+
 ### 갱신과 검증
 
 - 같은 설정으로 다시 실행합니다. 정규화한 입력이 같으면 기존 번들을 유지합니다. 매번 입력 원본과 DB 변경을 확인합니다. 내용·구문 분석기·OCR 설정이 같은 파일의 추출 결과는 재사용하고, 변경된 입력으로 새 스냅샷을 만듭니다.
@@ -108,6 +158,33 @@ synthesis:
 ```sh
 python -m unittest discover -s tests -v
 ```
+
+### 현장용 위키 승인
+
+`output/current`는 검토용 최신 초안입니다. 빌드의 `published`는 설정된 필수 근거와 OKF 검사를 통과한 초안의 스냅샷 저장 완료를 뜻합니다. 필수 묶음 검사는 설정에 등록한 항목을 대상으로 합니다. 설비 형식, 주파수, 개정본, 정비 조건의 현장 적용성은 승인 과정에서 담당자가 확인합니다.
+
+1. 현재 필수 근거 설정으로 빌드가 완료되면 `clew-okf release-candidate --config okf.local.yaml`로 검토할 초안의 경로, 스냅샷 ID, 내용 해시와 모델 검토 결과를 확인합니다.
+2. 현장 담당자는 설비 모델과 개정본을 확인하고, 수치의 단위·적용 조건과 절차 순서를 원문과 대조합니다. 지적이나 미검토 구간을 확인한 뒤 승인합니다.
+3. 승인 담당자만 접근하는 서버에서 검토한 초안의 ID와 해시를 승인합니다.
+
+```sh
+clew-okf release-approve --config okf.local.yaml \
+  --snapshot '검토한 스냅샷 ID' --sha256 '검토한 bundle_sha256' --reviewer '담당자 이름'
+clew-okf release-show --config okf.local.yaml
+```
+
+서비스의 검색·색인 입력은 `GET /wiki/release`가 돌려준 `bundle` 경로를 사용합니다. 승인본이 없거나 승인한 번들이 변경되면 API는 `404`를 반환합니다. 새 초안이 생성돼도 승인본은 유지되며, 새 버전을 색인하려면 담당자의 승인이 필요합니다. `output/current`는 검토 화면에 연결합니다.
+
+### 위키 작업실
+
+기존 FastAPI 앱에서 기본 경로 `/wiki/studio`를 열면 설정된 위키를 탐색할 수 있습니다. 별도 프런트엔드 서버 없이 동기·비동기 위키 라우터의 경로와 접근 제어를 그대로 사용합니다. 경로 접두사를 바꾼 경우 해당 접두사 뒤에 `/studio`를 붙입니다.
+
+- **데이터 흐름**은 실제 원문 인용·참고 링크, 설비 문서, 검토 기록, 승인 상태를 한 도식으로 엽니다. 노드를 선택하면 같은 화면 아래쪽의 데이터 표에서 원문, 개정, 위치와 발췌를 확인합니다.
+- **탐색기·본문 링크·각주**에서 문서를 누르면 같은 화면 하단에 원문 발췌와 참조 관계가 열립니다. 중앙 본문과 주소를 유지합니다. 하단 패널은 높이를 조절하고 이전에 연 자료로 돌아갈 수 있습니다. **탭으로 열기**와 **오른쪽에 펼치기**를 이용해 자료를 따로 읽을 수 있습니다.
+- **빠른 문서 찾기**는 Ctrl/⌘+O로, **명령 팔레트**는 Ctrl/⌘+P로 엽니다. 문서 선택 결과도 하단에 표시됩니다. 데스크톱에서는 내부 링크에 마우스를 올려 짧은 내용을 확인할 수 있습니다.
+- **연결 보기**는 실제 Markdown 링크로 현재 문서의 참조·역참조 또는 전체 위키를 표시합니다. 연결 깊이와 방향, 문서 이름 필터를 조정하고 그래프를 끌거나 확대할 수 있습니다. 노드를 누르면 하단에 해당 자료가 열립니다.
+- **작업 기록**은 비동기 작업의 처리 단계와 보류 사유를 읽습니다. 검토 지적과 보류 상세에서 관련 원문의 위치와 구절을 모아 볼 수 있습니다.
+- **운영 승인본** 전환은 승인한 스냅샷을 표시합니다. 작업실에서 스냅샷, 원문에서 추출한 내용, 승인 상태를 조회할 수 있습니다. 새 운영 버전 승인에는 위의 `release-approve` 절차를 사용합니다.
 
 ## FastAPI 서비스의 위키 에이전트
 
@@ -163,7 +240,7 @@ curl --request POST http://127.0.0.1:8000/wiki/build
 | HTTP 응답 | 의미 |
 |---|---|
 | `200` | 빌드 완료. `state`는 `published`, `unchanged`, `reused` 중 하나입니다. |
-| `409` | 같은 출력 폴더에 대한 다른 빌드가 실행 중입니다. |
+| `409` | 같은 출력 폴더에 대한 다른 빌드가 실행 중이거나 필수 근거가 누락됐습니다. 필수 근거 보류는 `detail.status: hold`와 `detail.findings`를 반환합니다. |
 | `422` | 설정 또는 입력 형식을 확인해야 합니다. |
 | `502` | DB 또는 작성 모델 호출 같은 실행 단계가 실패했습니다. |
 | `503` | 파일·출력 경로의 I/O 단계가 실패했습니다. |

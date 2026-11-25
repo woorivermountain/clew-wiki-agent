@@ -2,6 +2,7 @@ import hashlib
 import json
 import posixpath
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -9,11 +10,14 @@ from urllib.parse import quote, urlsplit
 
 import yaml
 
+from clew_okf._version import __version__
 from clew_okf.providers.llm import JsonModel
 from clew_okf.runtime.progress import emit
+from clew_okf.domain.errors import RequiredEvidenceMissingError
 from clew_okf.domain.model import Block, Equipment, Source
 from clew_okf.stages.step_05_review.review import review_quotes
-from clew_okf.stages.step_04_compose.synthesis import curate
+from clew_okf.stages.step_04_compose.structured_evidence import EvidenceGroup, resolve_structured_evidence
+from clew_okf.stages.step_04_compose.synthesis import _max_parallel_equipment, curate
 
 CITATION = re.compile(r"\[\^(src-[0-9a-f]{24})\]")
 DEFINITION = re.compile(r"^\[\^(src-[0-9a-f]{24})\]:", re.MULTILINE)
@@ -94,7 +98,7 @@ def _common(title: str, kind: str, timestamp: str) -> dict:
         "type": kind,
         "title": title,
         "status": "draft",
-        "generated": {"by": "clew-okf/0.1.0", "at": timestamp},
+        "generated": {"by": f"clew-okf/{__version__}", "at": timestamp},
     }
 
 
@@ -102,6 +106,38 @@ def _common(title: str, kind: str, timestamp: str) -> dict:
 class BundleResult:
     selected_quotes: int
     wiki_reviews: list[dict]
+    selected_groups: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _RenderedClaim:
+    spans: tuple[tuple[str, str], ...]
+    label: str | None = None
+
+
+def _missing_group_finding(
+    equipment_key: str, group: EvidenceGroup, lookup: dict[str, tuple[Source, Block]]
+) -> dict:
+    originals = []
+    for identifier, excerpt in group.spans:
+        source, block = lookup[identifier]
+        originals.append({
+            "evidence_id": identifier,
+            "source_key": source.key,
+            "source_title": source.title,
+            "revision": source.revision,
+            "locator": block.locator,
+            "quote": excerpt,
+        })
+    return {
+        "code": "required_evidence_missing",
+        "message": "작성 결과에 필수 근거 묶음이 없습니다.",
+        "equipment_key": equipment_key,
+        "group_id": group.identifier.removeprefix("group-"),
+        "label": group.label,
+        "evidence_ids": list(dict.fromkeys(original["evidence_id"] for original in originals)),
+        "evidence": originals,
+    }
 
 
 def write_bundle(
@@ -123,6 +159,14 @@ def write_bundle(
             if key not in scoped:
                 raise ValueError(f"등록되지 않은 설비 키 {key!r}: {source.key}")
             scoped[key].append(source)
+
+    source_evidence = {source.key: evidence(source) for source in sources}
+    protected, groups = resolve_structured_evidence(
+        synthesis,
+        {identifier: (source, block) for source in sources if source.synthesize
+         for identifier, block in source_evidence[source.key]},
+        set(scoped),
+    )
 
     for source in sources:
         path = _source_path(source)
@@ -146,7 +190,7 @@ def write_bundle(
             lines.extend([f"- 관련 사례 [{inline(target.title)}]({_relative(path, _source_path(target))})", ""])
         refs = []
         definitions = []
-        for identifier, block in evidence(source):
+        for identifier, block in source_evidence[source.key]:
             refs.append(_source_entry(identifier, source.resource, source.title))
             definitions.append(_citation(identifier, source.title, block.locator, source.revision, source.resource))
             lines.extend([f"## {inline(block.locator)} [^{identifier}]", "", *_literal(block.text)])
@@ -157,10 +201,11 @@ def write_bundle(
         fields["sources"] = refs
         pages[path] = (source.title, document(fields, lines + definitions))
 
-    selected = 0
-    wiki_reviews: list[dict] = []
     review_enabled = synthesis is not None and synthesis.get("review", True)
-    for item in equipment:
+
+    def build_equipment(
+        item: Equipment,
+    ) -> tuple[str, tuple[str, str], int, int, dict | None] | RequiredEvidenceMissingError:
         label = item.fields.get("name") or item.equipment_id
         path = f"equipment/{file_key(item.key)}.md"
         fields = _common(label, "Equipment", timestamp)
@@ -180,31 +225,59 @@ def write_bundle(
             target = _source_path(source)
             revision = f" · {inline(source.revision)}" if source.revision else ""
             lines.append(f"- [{inline(source.title)}]({_relative(path, target)}){revision}")
-            lookup.update({identifier: (source, block) for identifier, block in evidence(source)})
+            if source.synthesize:
+                lookup.update({identifier: (source, block) for identifier, block in source_evidence[source.key]})
         if not scoped[item.key]:
             lines.append("- 확인할 자료가 아직 연결되지 않았습니다.")
         lines.append("")
 
-        sections: dict[str, list[tuple[str, str, str]]] = {}
-        author_evidence = [
-            (identifier, block)
-            for source in scoped[item.key] if source.synthesize
-            for identifier, block in evidence(source)
-        ]
+        sections: dict[str, list[_RenderedClaim]] = {}
+        equipment_groups = {identifier: group for identifier, group in groups.items() if item.key in group.equipment_ids}
+        author_evidence = [(identifier, block) for identifier, (_, block) in lookup.items()
+                           if identifier not in protected]
+        author_evidence.extend((identifier, group.block) for identifier, group in equipment_groups.items())
+        used_groups: set[str] = set()
         if synthesis is not None and author_evidence:
-            for claim in curate(
-                synthesis, item.key, author_evidence, provider=provider
-            ):
-                sections.setdefault(claim[1], []).append(claim)
-        ordered_claims = [claim for statements in sections.values() for claim in statements]
-        selected += len(ordered_claims)
+            for identifier, section, quote in curate(synthesis, item.key, author_evidence, provider=provider):
+                if group := equipment_groups.get(identifier):
+                    if identifier in used_groups:
+                        continue
+                    used_groups.add(identifier)
+                    claim = _RenderedClaim(group.spans, group.label)
+                else:
+                    claim = _RenderedClaim(((identifier, quote),))
+                sections.setdefault(section, []).append(claim)
+
+        missing = [
+            _missing_group_finding(item.key, group, lookup)
+            for identifier, group in equipment_groups.items()
+            if group.required and identifier not in used_groups
+        ]
+        if missing:
+            return RequiredEvidenceMissingError(missing)
+
+        ordered_claims: list[tuple[str, str, str]] = []
+        draft_groups = []
+        for section, statements in sections.items():
+            for statement in statements:
+                start = len(ordered_claims) + 1
+                ordered_claims.extend((identifier, section, quote) for identifier, quote in statement.spans)
+                if statement.label is not None:
+                    draft_groups.append({
+                        "label": statement.label,
+                        "claim_ids": list(range(start, len(ordered_claims) + 1)),
+                    })
+
+        review_data = None
         by_claim: dict[int, list[dict]] = {}
         if synthesis is not None and review_enabled:
-            review = review_quotes(synthesis, item.key, item.fields, lookup, ordered_claims, provider=provider)
+            review = review_quotes(
+                synthesis, item.key, item.fields, lookup, ordered_claims,
+                provider=provider, draft_groups=draft_groups,
+            )
             review_data = asdict(review)
             review_data["writer_model"] = synthesis["model"]
             review_data["review_model"] = synthesis.get("review_model") or synthesis["model"]
-            wiki_reviews.append({"equipment_key": item.key, **review_data})
             fields["clew_review"] = {
                 key: value for key, value in review_data.items() if key != "issues"
             }
@@ -225,22 +298,53 @@ def write_bundle(
         claim_id = 0
         for section, statements in sections.items():
             lines.extend([f"## {section}", ""])
-            for identifier, _, quote in statements:
-                claim_id += 1
-                cited.add(identifier)
-                lines.append(f"- {inline(quote)} [^{identifier}]")
-                for issue in by_claim.get(claim_id, []):
-                    issue_ids = issue["evidence_ids"]
-                    citations = " ".join(f"[^{source_id}]" for source_id in issue_ids)
-                    cited.update(issue_ids)
-                    lines.append(f"  - **검토 필요** · {inline(issue['message'])} {citations}")
+            for statement in statements:
+                indent = ""
+                if statement.label is not None:
+                    lines.append(f"- **{inline(statement.label)}**")
+                    indent = "  "
+                for identifier, quote in statement.spans:
+                    claim_id += 1
+                    cited.add(identifier)
+                    lines.append(f"{indent}- {inline(quote)} [^{identifier}]")
+                    for issue in by_claim.get(claim_id, []):
+                        issue_ids = issue["evidence_ids"]
+                        citations = " ".join(f"[^{source_id}]" for source_id in issue_ids)
+                        cited.update(issue_ids)
+                        lines.append(f"{indent}  - **검토 필요** · {inline(issue['message'])} {citations}")
             lines.append("")
         for identifier in sorted(cited):
             source, block = lookup[identifier]
             refs.append(_source_entry(identifier, source.resource, source.title))
             definitions.append(_citation(identifier, source.title, block.locator, source.revision, source.resource))
         fields["sources"] = refs
-        pages[path] = (label, document(fields, lines + definitions))
+        review_entry = {"equipment_key": item.key, **review_data} if review_data is not None else None
+        return path, (label, document(fields, lines + definitions)), len(ordered_claims), len(draft_groups), review_entry
+
+    workers = _max_parallel_equipment(synthesis) if synthesis is not None else 1
+    if workers > 1 and len(equipment) > 1:
+        with ThreadPoolExecutor(max_workers=min(workers, len(equipment))) as executor:
+            equipment_pages = list(executor.map(build_equipment, equipment))
+    else:
+        equipment_pages = list(map(build_equipment, equipment))
+
+    selected = 0
+    selected_groups = 0
+    wiki_reviews: list[dict] = []
+    missing_findings = []
+    for equipment_page in equipment_pages:
+        if isinstance(equipment_page, RequiredEvidenceMissingError):
+            missing_findings.extend(equipment_page.findings)
+            continue
+        path, page, quote_count, group_count, review_entry = equipment_page
+        pages[path] = page
+        selected += quote_count
+        selected_groups += group_count
+        if review_entry is not None:
+            wiki_reviews.append(review_entry)
+
+    if missing_findings:
+        raise RequiredEvidenceMissingError(missing_findings)
 
     index = [f"# {inline(title)}", ""]
     for prefix, heading in (("equipment", "설비"), ("references", "원본 문서"), ("database", "DB")):
@@ -267,7 +371,7 @@ def write_bundle(
     for path, (_, content) in pages.items():
         _write(directory / path, content)
     validate_bundle(directory)
-    return BundleResult(selected, wiki_reviews)
+    return BundleResult(selected, wiki_reviews, selected_groups)
 
 
 def _parts(text: str) -> tuple[dict, str]:

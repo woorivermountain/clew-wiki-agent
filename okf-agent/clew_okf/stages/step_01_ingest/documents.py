@@ -19,7 +19,7 @@ from clew_okf.domain.model import Block, Source
 _TEXT_FORMATS = {".md", ".markdown", ".txt", ".csv"}
 _KORDOC_FORMATS = {".hwp", ".hwpx", ".pdf", ".docx", ".pptx", ".xlsx"}
 _OCR_FORMATS = {".hwp", ".hwpx", ".pdf"}
-_FILE_OPTIONS = {"title", "type", "equipment_ids", "revision", "source_uri", "ocr"}
+_FILE_OPTIONS = {"title", "type", "equipment_ids", "revision", "source_uri", "ocr", "synthesize"}
 _IMAGE_LINE = re.compile(r"^\s*!\[[^\]\n]*\]\([^\n]*\)\s*$", re.MULTILINE)
 
 _CACHE_FORMAT = 1
@@ -95,6 +95,7 @@ def load_documents(
             revision=options.get("revision"),
             warnings=parse_warnings,
             concept_type=options.get("type"),
+            synthesize=options.get("synthesize", True),
         ))
     return sources, warnings
 
@@ -163,6 +164,10 @@ def _validate_file_options(mapping: object) -> dict[str, dict]:
             if options["ocr"] and relative.suffix.lower() not in _OCR_FORMATS:
                 raise ValueError(f"OCR is only supported for HWP, HWPX, or PDF: {key}")
             checked["ocr"] = options["ocr"]
+        if "synthesize" in options:
+            if type(options["synthesize"]) is not bool:
+                raise ValueError(f"Expected a boolean synthesize option for {key}")
+            checked["synthesize"] = options["synthesize"]
         result[key] = checked
     return result
 

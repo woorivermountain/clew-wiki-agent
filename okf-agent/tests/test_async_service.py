@@ -11,15 +11,16 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import yaml
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.testclient import TestClient
 
 from clew_okf import WikiAgent
-from clew_okf.async_api import install_wiki_service
+from clew_okf.async_api import create_service_router, install_wiki_service
 from clew_okf.stages.step_06_publish.bundle import file_key, validate_bundle
 from clew_okf.runtime.jobs import JobStore
 from clew_okf.domain.model import Block, Source
 from clew_okf.service import WikiService
+from clew_okf.workflows.release import approve_release, inspect_release_candidate
 from clew_okf.runtime.worker import WikiWorker
 from test_mapping_admission import FIELDS, MappingProvider
 
@@ -67,6 +68,26 @@ class AsyncServiceTests(unittest.TestCase):
 
     def page(self, rid="S-1"):
         return self.current / "references" / f"{file_key('report:' + rid)}.md"
+
+    def test_release_inherits_router_dependencies(self):
+        def authorize(x_access: str = Header(default="")):
+            if x_access != "trusted":
+                raise HTTPException(403)
+
+        app = FastAPI()
+        app.include_router(create_service_router(self.service, dependencies=[Depends(authorize)]))
+        headers = {"x-access": "trusted"}
+        with TestClient(app) as client:
+            draft_only = client.get("/wiki/release", headers=headers)
+            self.assertEqual(draft_only.status_code, 404, draft_only.text)
+            candidate = inspect_release_candidate(self.path)
+            release = approve_release(self.path, snapshot=candidate["snapshot"],
+                bundle_sha256=candidate["bundle_sha256"], reviewer="supervisor")
+            self.assertEqual(client.get("/wiki/release").status_code, 403)
+            approved = client.get("/wiki/release", headers=headers)
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.assertEqual(approved.headers["cache-control"], "no-store")
+        self.assertEqual(approved.json(), release)
 
     def test_save_returns_queued_before_model_and_default_approval_holds(self):
         old = self.current.resolve()
@@ -120,6 +141,48 @@ class AsyncServiceTests(unittest.TestCase):
         self.assertTrue(any(item.get("field") == "result" for item in status["hold_reasons"]))
         self.assertFalse(self.page().exists())
         self.assertEqual(old, self.current.resolve())
+
+    def test_required_evidence_omission_holds_build_and_mapped_report(self):
+        old = self.current.resolve()
+        quote = self.manual.read_text(encoding="utf-8").strip()
+        self.config["synthesis"]["structured_evidence"] = [{
+            "source_key": "docs:manual.md",
+            "protected_locators": ["line 1"],
+            "groups": [{
+                "id": "maintenance", "label": "베어링 교체 조건", "required": True,
+                "equipment_ids": ["P1/EQ1"],
+                "spans": [{"locator": "line 1", "quote": quote}],
+            }],
+        }]
+        self.write_config()
+
+        complete = self.provider.complete
+
+        def omit_required_group(system, payload, *, model=None):
+            if "evidence" in payload:
+                return {"claims": []}
+            return complete(system, payload, model=model)
+
+        client = self.make_client(lambda _id, _version, submission: {
+            "status": "finalized", "reuse_approved": True, "approved_fingerprint": submission["fingerprint"],
+        })
+        with patch.object(self.provider, "complete", side_effect=omit_required_group):
+            for endpoint, body in (("/wiki/build", {}), ("/wiki/reports/S-1", self.request())):
+                with self.subTest(endpoint=endpoint):
+                    enqueued = client.post(endpoint, json=body)
+                    self.assertEqual(enqueued.status_code, 202, enqueued.text)
+                    self.worker.run_once()
+                    status = client.get(enqueued.json()["status_url"]).json()
+                    self.assertEqual(status["status"], "held", status)
+                    self.assertEqual(status["result"]["status"], "hold")
+                    finding, = status["hold_reasons"]
+                    self.assertEqual(finding["code"], "required_evidence_missing")
+                    self.assertEqual(finding["label"], "베어링 교체 조건")
+                    evidence, = finding["evidence"]
+                    self.assertEqual((evidence["source_key"], evidence["locator"], evidence["quote"]),
+                                     ("docs:manual.md", "line 1", quote))
+                    self.assertEqual(self.current.resolve(), old)
+                    self.assertFalse(self.page().exists())
 
     def test_inflight_model_does_not_block_status_or_another_save(self):
         entered, released = threading.Event(), threading.Event()

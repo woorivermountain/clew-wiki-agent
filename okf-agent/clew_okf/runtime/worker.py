@@ -14,7 +14,7 @@ import yaml
 
 from clew_okf.stages.step_01_ingest.bootstrap import scan_database
 from clew_okf.workflows.compiler import BuildInProgressError
-from clew_okf.domain.errors import RevalidationRequiredError
+from clew_okf.domain.errors import RequiredEvidenceMissingError, RevalidationRequiredError
 from clew_okf.runtime.progress import emit, reporting
 from clew_okf.runtime.service import WikiService
 from clew_okf.stages.step_01_ingest.report_store import CanonicalReportHoldError
@@ -119,6 +119,9 @@ class WikiWorker:
         except CanonicalReportHoldError as error:
             store.finish(job["id"], token, status="held", result={"status": "hold", "findings": [{
                 "code": error.code, "message": error.public_message}]})
+        except RequiredEvidenceMissingError as error:
+            store.finish(job["id"], token, status="held",
+                         result={"status": "hold", "findings": error.findings})
         except RevalidationRequiredError as error:
             store.finish(job["id"], token, status="held", result={"status": "hold", "findings": [{
                 "code": error.code, "message": str(error)}]})

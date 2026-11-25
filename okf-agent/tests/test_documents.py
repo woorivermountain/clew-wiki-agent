@@ -77,6 +77,12 @@ class DocumentManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Mapped document files are missing.*missing.md"):
             self.load(files={"missing.md": {}})
 
+    def test_synthesize_option_must_be_boolean(self):
+        (self.root / "manual.md").write_text("Example", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "Expected a boolean synthesize option"):
+            self.load(files={"manual.md": {"synthesize": "false"}})
+
     def test_manifest_flag_must_be_boolean(self):
         with self.assertRaisesRegex(ValueError, "documents.include_only_listed must be a boolean"):
             self.load(include_only_listed="false")

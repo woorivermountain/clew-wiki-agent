@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clew-okf-agent"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Compile CLEW equipment, documents and database metadata into OKF v0.2"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,3 +20,9 @@ clew-okf = "clew_okf.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["clew_okf*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "clew_okf._version.__version__"}
+
+[tool.setuptools.package-data]
+"clew_okf.interfaces" = ["studio_assets/*.html", "studio_assets/*.css", "studio_assets/*.js"]

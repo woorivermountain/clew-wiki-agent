@@ -1,4 +1,6 @@
+from contextlib import redirect_stdout
 import csv
+from io import StringIO
 import json
 import os
 import subprocess
@@ -7,12 +9,13 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Thread
+from threading import Barrier, Thread
 from unittest.mock import patch
 
 import yaml
 
-from clew_okf.cli import _build
+from clew_okf.cli import _build, main
+from clew_okf.domain.errors import RequiredEvidenceMissingError
 
 PACKAGE = Path(__file__).resolve().parents[1]
 
@@ -85,6 +88,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result["state"], "published")
         page = self.equipment_pages()["A/C-2100"]
         self.assertEqual(yaml.safe_load(page.split("---", 2)[1])["title"], "C-2100")
+
+    def test_build_hold_returns_nonzero_with_structured_findings(self):
+        findings = [{"code": "required_evidence_missing", "label": "최소 연 1회"}]
+        output = StringIO()
+        with (
+            patch.object(sys, "argv", ["clew-okf", "build", "--config", str(self.config_path)]),
+            patch("clew_okf.cli._build", side_effect=RequiredEvidenceMissingError(findings)),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(main(), 1)
+        self.assertEqual(json.loads(output.getvalue()), {"status": "hold", "findings": findings})
 
     def test_csv_equipment_still_requires_nonempty_name(self):
         (self.root / "equipment.csv").write_text("equipment_id,name\nC-2100,  \n", encoding="utf-8")
@@ -191,6 +205,78 @@ class CliTests(unittest.TestCase):
             "review_model": "test-reviewer",
         }
         return requests
+
+    def test_reference_only_document_remains_linked_and_stays_out_of_model_inputs(self):
+        restricted = "보존하는 과거 사례 원문"
+        (self.manuals / "case-history.md").write_text(restricted, encoding="utf-8")
+        self.config["documents"]["files"]["case-history.md"] = {
+            "title": "보존 사례",
+            "equipment_ids": ["A/C-2100"],
+            "synthesize": False,
+        }
+
+        def respond(payload):
+            if payload.get("role") == "independent_reviewer":
+                return {"issues": []}
+            return {"claims": [{
+                "id": payload["evidence"][0]["id"],
+                "section": "적용 조건",
+                "quote": "±0.15 mm",
+            }]}
+
+        requests = self.synthesis_model(respond)
+        report = self.build()
+
+        self.assertEqual(report["sources"], 2)
+        self.assertEqual(report["selected_quotes"], 1)
+        self.assertEqual([model for model, _ in requests], ["test-writer", "test-reviewer"])
+        self.assertTrue(self.review_for(report)["coverage_complete"])
+        self.assertEqual(self.review_for(report)["total_blocks"], 1)
+        self.assertNotIn(restricted, json.dumps(requests, ensure_ascii=False))
+        self.assertIn("보존 사례", self.equipment_pages()["A/C-2100"])
+        self.assertIn("보존 사례", (self.current / "index.md").read_text(encoding="utf-8"))
+        references = (self.current / "references").glob("*.md")
+        self.assertTrue(any(restricted in page.read_text(encoding="utf-8") for page in references))
+
+    def test_parallel_equipment_preserves_publication_order_and_scope(self):
+        second_quote = "압력 기준 0.55 MPa"
+        (self.manuals / "second.md").write_text(second_quote, encoding="utf-8")
+        self.config["documents"]["files"]["second.md"] = {"equipment_ids": ["B/C-2100"]}
+        writers = Barrier(2, timeout=5)
+
+        def respond(payload):
+            if payload.get("role") == "independent_reviewer":
+                return {"issues": []}
+            source, = payload["evidence"]
+            writers.wait()
+            return {"claims": [{
+                "id": source["id"],
+                "section": "적용 조건",
+                "quote": source["text"].strip(),
+            }]}
+
+        requests = self.synthesis_model(respond)
+        self.config["synthesis"]["max_parallel_equipment"] = 2
+        report = self.build()
+
+        self.assertEqual(report["state"], "published")
+        self.assertEqual(report["selected_quotes"], 2)
+        self.assertEqual([r["equipment_key"] for r in report["wiki_reviews"]], ["A/C-2100", "B/C-2100"])
+        self.assertTrue(all(r["status"] == "passed" for r in report["wiki_reviews"]))
+        self.assertCountEqual([model for model, _ in requests], ["test-writer", "test-reviewer"] * 2)
+        pages = self.equipment_pages()
+        self.assertIn("±0.15 mm", pages["A/C-2100"])
+        self.assertNotIn(second_quote, pages["A/C-2100"])
+        self.assertIn(second_quote, pages["B/C-2100"])
+        self.assertNotIn("±0.15 mm", pages["B/C-2100"])
+        self.assertEqual(self.run_cli("check", self.current).returncode, 0)
+
+    def test_parallel_equipment_limit_is_validated(self):
+        self.synthesis_model(lambda _: {"claims": []})
+        for value in (0, 7, True, "2"):
+            with self.subTest(value=value):
+                self.config["synthesis"]["max_parallel_equipment"] = value
+                self.assertIn("synthesis.max_parallel_equipment", self.build(expected=1))
 
     def test_model_empty_claims_are_reported_without_calling_reviewer(self):
         requests = self.synthesis_model(lambda _: {"claims": []})

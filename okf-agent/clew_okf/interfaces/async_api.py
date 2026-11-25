@@ -7,13 +7,15 @@ import hashlib
 import json
 from typing import Annotated, Any, Callable, Literal
 
-from fastapi import APIRouter, Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
 from clew_okf.stages.step_01_ingest.managed_intake import InputConflictError, InputNotFoundError, InputValidationError, submission_descriptor
+from clew_okf.interfaces.studio import create_studio_router
 from clew_okf.domain.reports import Identifier, PositiveVersion, ReportIdentifier
+from clew_okf.interfaces.api import WikiReleaseResponse, _get_approved_release
 from clew_okf.runtime.service import WikiService
 
 
@@ -117,6 +119,12 @@ def create_service_router(service: WikiService, *, prefix: str = "/wiki", approv
                           dependencies: list | None = None) -> APIRouter:
     """Approval resolver belongs to the trusted main service, never request JSON."""
     router = APIRouter(prefix=prefix, tags=["wiki-jobs"], dependencies=dependencies or [])
+
+    router.include_router(create_studio_router(service.config_path, jobs_available=True))
+
+    @router.get("/release", response_model=WikiReleaseResponse)
+    def release(response: Response) -> dict:
+        return _get_approved_release(service.config_path, response)
 
     async def approval(report_id: str, version: int, submission: dict) -> dict:
         if approval_resolver is None:

@@ -16,8 +16,10 @@ except ImportError:
 else:
     HAS_API = True
     from clew_okf import WikiAgent
+    from clew_okf.domain.errors import RequiredEvidenceMissingError
     from clew_okf.api import create_app, create_router
     from clew_okf.workflows.compiler import BuildInProgressError
+    from clew_okf.workflows.release import approve_release, inspect_release_candidate
 
 
 @unittest.skipUnless(HAS_API, "Install the optional API and test dependencies")
@@ -63,6 +65,34 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(again.json()["snapshot"], result["snapshot"])
             self.assertEqual(again.json()["bundle"], result["bundle"])
 
+    def test_release_returns_approved_bundle_only(self):
+        with self.client(prefix="/internal/wiki") as client:
+            self.assertEqual(client.post("/internal/wiki/build").status_code, 200)
+            draft_only = client.get("/internal/wiki/release")
+            self.assertEqual(draft_only.status_code, 404, draft_only.text)
+            self.assertEqual(draft_only.headers["cache-control"], "no-store")
+
+            candidate = inspect_release_candidate(self.config)
+            release = approve_release(self.config, snapshot=candidate["snapshot"],
+                bundle_sha256=candidate["bundle_sha256"], reviewer="supervisor")
+            approved = client.get("/internal/wiki/release", params={"config_path": "untrusted.yaml"})
+            self.assertEqual(approved.status_code, 200, approved.text)
+            self.assertEqual(approved.headers["cache-control"], "no-store")
+            self.assertEqual(approved.json(), release)
+
+            (self.originals / "manual.md").write_text("새 위키 초안\n", encoding="utf-8")
+            newer_draft = client.post("/internal/wiki/build")
+            self.assertEqual(newer_draft.status_code, 200, newer_draft.text)
+            self.assertNotEqual(newer_draft.json()["snapshot"], release["snapshot"])
+            self.assertEqual(client.get("/internal/wiki/release").json(), release)
+
+            card, = (Path(release["bundle"]) / "equipment").glob("*.md")
+            card.write_text(card.read_text(encoding="utf-8") + "\n내용이 변조됐습니다.\n", encoding="utf-8")
+            tampered = client.get("/internal/wiki/release")
+            self.assertEqual(tampered.status_code, 404, tampered.text)
+            self.assertEqual(tampered.headers["cache-control"], "no-store")
+            self.assertEqual(set(tampered.json()), {"detail"})
+
     def test_conflicting_build_returns_409_and_preserves_current(self):
         with self.client() as client:
             first = client.post("/wiki/build")
@@ -76,6 +106,19 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 409)
             self.assertEqual(current.resolve(), previous)
             self.assertEqual(client.post("/wiki/build").status_code, 200)
+
+    def test_required_evidence_hold_exposes_review_details(self):
+        findings = [{
+            "code": "required_evidence_missing", "group_id": "inspection",
+            "evidence": [{"source_key": "docs:manual.md", "locator": "line 1", "quote": "점검 조건"}],
+        }]
+        agent = Mock(spec=WikiAgent)
+        agent.run.side_effect = RequiredEvidenceMissingError(findings)
+        with self.client(agent) as client:
+            response = client.post("/wiki/build")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(response.json(), {"detail": {"status": "hold", "findings": findings}})
 
     def test_errors_are_mapped_without_exposing_internal_details(self):
         secret = "private-password database-host /private/manual.pdf"

@@ -2,7 +2,7 @@
 
 **설비 매뉴얼과 정비 보고서를 원문 근거가 연결된 제조 위키로 구성합니다.** PostgreSQL, HWP·HWPX·PDF를 공통 필드로 매핑하고 설비 연결, 중복·유사 사례와 개정 충돌을 검증합니다. 통과한 보고서는 설비별 정비 사례로 편입하며, 결과물은 OKF v0.2 Markdown으로 저장합니다.
 
-[사용법](okf-agent/README.md) · [에이전트 구조](docs/에이전트-구조.md) · [공장 데이터 준비](docs/실공장-데이터-준비.md) · [FastAPI 연동](docs/FastAPI-자동편입-초기구성.md) · [검증 기록](docs/비동기-초기구성-검증-2026-11-19.md)
+[사용법](okf-agent/README.md) · [에이전트 구조](docs/에이전트-구조.md) · [공장 데이터 준비](docs/실공장-데이터-준비.md) · [FastAPI 연동](docs/FastAPI-자동편입-초기구성.md) · [검증 기록](docs/비동기-초기구성-검증-2026-11-19.md) · [변경 기록](okf-agent/CHANGELOG.md)
 
 `Python 3.11+` · `FastAPI` · `PostgreSQL` · `SQLite WAL` · `OKF v0.2` · `kordoc`
 
@@ -19,9 +19,10 @@
 | 첫 위키 구성 | 허용된 DB 스키마와 설비 마스터를 읽기 전용으로 확인하고, 설정된 현행 근거로 기본 위키를 구성합니다. |
 | 보고서 자동 매핑 | HWP·HWPX·PDF·DB 원문에서 제목·조건·관측·조치·결과·공장·설비·사건 ID를 추출하고 필드별 근거를 보존합니다. |
 | 보고서 편입 심사 | 원문 근거, 설비 연결, 중복·유사 사례와 개정 충돌을 확인합니다. 승인 전이거나 근거가 부족한 보고서는 보류합니다. |
+| 표·각주 인용 | 지정한 표 행·단위·적용 조건·각주를 묶어 전달합니다. 모델이 일부를 고르면 원문 위치별 각주와 함께 전체 묶음을 저장합니다. 필수 묶음을 고르지 않으면 빠진 조건과 원문을 표시하고 빌드를 보류합니다. [설정 예시](okf-agent/README.md#조건과-각주를-함께-인용) |
 | 문장별 검토 | 적용 조건·개정·점검 순서를 검토하고 문제가 있는 문장에 원문 근거와 메모를 붙입니다. 정상 문장과 인용문은 유지합니다. |
 | 비동기 처리 | FastAPI가 작업 ID를 반환하고 별도 워커가 처리합니다. 진행 단계·보류 사유·재시도를 조회할 수 있습니다. |
-| 위키 발행 | OKF·링크 검사와 원본 재확인 후 현재 스냅샷을 교체하고, 이전 버전·출처·편입 원장을 보관합니다. |
+| 위키 발행 | OKF·링크 검사와 원본 재확인 후 최신 초안을 교체합니다. 담당자가 확인한 버전은 `GET /wiki/release`에서 조회합니다. |
 
 기존 검증 기록은 자동 테스트 **195개 통과**, 합성 제조 데이터로 PostgreSQL·HTTP·독립 워커를 연결한 **GPT-5.6 Sol 실제 호출 16회**입니다. 실제 공장 데이터의 추출·판단 품질과 운영 규모는 현장 데이터로 추가 검증해야 합니다. 보고서 편입 결과와 문장 검토 메모는 별도로 확인하며, 자동 생성 위키 페이지의 상태는 `draft`입니다.
 
@@ -118,11 +119,11 @@ flowchart TD
 | 03 편입 검증 | [admission._admit()](okf-agent/clew_okf/stages/step_03_admission/admission.py#L96) → [evaluate_report()](okf-agent/clew_okf/stages/step_03_admission/admission_review.py#L62) | 코드가 근거 해시·개정 계보·동일 사건의 완전 중복을 먼저 확인합니다. 그다음 모델이 같은 설비의 현재 사례·원문·필드별 근거를 비교합니다. `create`·`new_case`·`attach`만 후속 발행으로 진행하고 판정의 ID·근거도 코드로 검사합니다. | **호출 ②** |
 | 04 위키 작성 | [publish_build()](okf-agent/clew_okf/workflows/compiler.py#L294) → [write_bundle()](okf-agent/clew_okf/stages/step_06_publish/bundle.py#L107) → [curate()](okf-agent/clew_okf/stages/step_04_compose/synthesis.py#L34) | 수용할 보고서 원장을 포함해 번들을 준비합니다. 설비별 작성용 근거에서 인용을 골라 분류하고, 인용문이 원문에 그대로 있는지 코드로 검증합니다. | **호출 ③**, 배치별 |
 | 05 문장 검토 | [review_quotes()](okf-agent/clew_okf/stages/step_05_review/review.py#L26) | 해당 설비의 인용 초안·원문·개정 정보를 별도 요청으로 비교해 조건 누락·개정 혼용·명시된 순서 오류 등을 지적합니다. 유효한 지적에는 근거를 붙이고 기존 문장은 유지합니다. | **호출 ④**, 설비별 |
-| 06 발행 | `validate_bundle()` → `publish_build()`의 원본 재확인 → `_publish()` | OKF 구조·각주·내부 링크를 검사하고 원본·승인·설비·기존 편입 보고서를 다시 확인합니다. 스냅샷이 준비되면 `output/current`를 원자적으로 교체하고 결과를 작업에 기록합니다. | 없음 |
+| 06 발행 | 필수 묶음 검사 → `validate_bundle()` → `publish_build()`의 원본 재확인 → `_publish()` | 지정한 필수 묶음이 본문에 모두 포함됐는지 확인합니다. OKF 구조·각주·내부 링크를 검사하고 원본·승인·설비·기존 편입 보고서를 다시 확인한 뒤 `output/current`를 원자적으로 교체합니다. | 없음 |
 
 **작성·검토는 `설비 A 작성 → 설비 A 검토 → 설비 B 작성 → 설비 B 검토` 순서입니다.** 현재 구현은 보고서가 속한 설비만 부분 갱신하는 방식이 아니라, 새 스냅샷의 전체 설비를 순회합니다. 새 보고서의 원문과 필드별 근거는 사례 페이지로 보존하고, 사건 당시 조치·결과는 일반 점검 절차 작성 입력에서 제외합니다.
 
-편입 심사와 문장 검토의 효과는 다릅니다. **편입 심사의 보류는 새 사례 반영을 막습니다.** 문장 검토는 지적을 남기는 자문 단계라 `needs_attention`·`partial`·`unavailable` 상태여도 인용 검사를 통과한 위키 초안은 게시할 수 있습니다. 따라서 작업 성공 여부와 `result.build.wiki_reviews`를 함께 확인해야 합니다. 생성 페이지의 상태는 `draft`입니다.
+**편입 심사 보류는 새 사례의 반영을 막습니다. 필수 근거 묶음 누락은 스냅샷 전체의 반영을 막습니다.** 문장 검토는 `needs_attention`·`partial`·`unavailable` 등의 상태와 지적을 `wiki_reviews`에 남깁니다. 발행 검사를 통과한 페이지는 `draft`로 게시되며, 현장 담당자가 원문과 대조해 승인한 스냅샷을 서비스에서 사용합니다. [현장용 위키 승인](okf-agent/README.md#현장용-위키-승인)
 
 ### LLM을 실제로 호출하는 네 곳
 
@@ -157,6 +158,7 @@ flowchart TD
 | 매핑 후 필수 항목·근거가 부족 | `hold`. ②~④를 실행하지 않음. |
 | 완전 중복·개정 충돌을 코드가 먼저 발견 | ② 편입 모델 호출 전에 종료. 원문 경로에서는 ① 매핑이 이미 실행됐을 수 있음. |
 | 모델이 중복 또는 보류로 판정 | ②에서 종료하고 ③~④ 및 새 사례 발행 생략. |
+| 작성 결과에 지정된 필수 묶음이 빠짐 | 새 스냅샷을 발행하지 않고 `required_evidence_missing`에 누락 조건과 원문을 기록. 이전 스냅샷 유지. |
 | 기존 스냅샷 재사용 / 인용 없음 / `review: false` | 작성·검토 일부 또는 전체 생략. 인용 없음은 `no_claims`로 기록. |
 
 DB에 저장한 원문은 주 DB 커밋 후 `report_saved(..., source="database")`로 등록하면 동일한 매핑 경로를 사용합니다. `source="canonical"`은 서버에서 읽은 JSONB 정본을 편입 심사로 연결합니다. 이 경로에서는 승인 상태를 DB 로더가 확인합니다. 입력·비교 후보 한도 초과도 중간 단계의 보류 사유가 될 수 있으며, 이후 모델 요청과 발행은 진행하지 않습니다.
@@ -267,13 +269,14 @@ HWP·HWPX·PDF를 지원하며 기본 파일 한도는 64 MiB입니다. 보고�
 | `POST /wiki/reports/{id}` | 텍스트 보고서 저장·작업 등록 |
 | `POST /wiki/reports/{id}/upload` | 파일 업로드·작업 등록 |
 | `POST /wiki/reports/{id}/saved` | 기존 DB 저장 이벤트 등록 |
+| `GET /wiki/studio` | 문서·근거·연결 그래프·검토·보류 이력을 탐색하는 웹 화면 |
 | `GET /wiki/jobs/{id}` | 상태·결과·보류 사유 |
 | `GET /wiki/jobs/{id}/events` | 실제 처리 단계 |
 | `GET /wiki/jobs/{id}/children` | 초기 구성의 보고서별 자식 작업 |
 | `GET /wiki/reports/{id}/status?version=1` | 관리형 보고서의 최신 작업 |
 | `POST /wiki/jobs/{id}/retry` | 보류·실패 작업을 새 작업으로 등록 |
 
-작업 상태는 `queued` → `running` → `succeeded`·`held`·`failed`이며, 초기 구성은 자식 작업을 기다리는 `waiting`도 사용합니다. `succeeded`의 발행·중복·변경 없음 결과는 `result`에서, 보류 원인은 `hold_reasons`에서 확인합니다.
+작업 상태는 `queued` → `running` → `succeeded`·`held`·`failed`이며, 초기 구성은 자식 작업을 기다리는 `waiting`도 사용합니다. `succeeded`의 발행·중복·변경 없음 결과는 `result`에서, 보류 원인은 `hold_reasons`에서 확인합니다. 필수 묶음 보류는 `result.findings`에서도 원문 위치와 구절을 제공합니다.
 
 </details>
 

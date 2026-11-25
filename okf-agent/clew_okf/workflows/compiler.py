@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import yaml
 
+from clew_okf._version import __version__
 from clew_okf.stages.step_06_publish.bundle import digest, validate_bundle, write_bundle
 from clew_okf.stages.step_01_ingest.documents import load_documents
 from clew_okf.domain.model import Equipment, Source
@@ -312,13 +313,13 @@ def publish_build(
         key=lambda source: source.key,
     )
     fingerprint = digest({
-        "builder": "0.1.0",
+        "builder": __version__,
         "admitted_reports": entries,
         "title": title,
         "sources": [asdict(source) for source in sources],
         "equipment": [asdict(item) for item in equipment],
         "warnings": warnings,
-        "synthesis": {"settings": synthesis, "protocol": "quote-annotations-v3"} if synthesis is not None else None,
+        "synthesis": {"settings": synthesis, "protocol": "quote-annotations-v5"} if synthesis is not None else None,
     })
     snapshots = output / "snapshots"
     snapshots.mkdir(exist_ok=True)
@@ -358,6 +359,7 @@ def publish_build(
             "sources": len(sources),
             "unmapped_documents": sum(source.kind == "document" and not source.equipment_ids for source in sources),
             "selected_quotes": result.selected_quotes,
+            "selected_groups": result.selected_groups,
             "warnings": warnings,
         }
         if synthesis is not None and synthesis.get("review", True):
@@ -369,6 +371,7 @@ def publish_build(
                 "revision": source.revision,
                 "concept_type": source.concept_type,
                 "equipment_ids": source.equipment_ids,
+                "synthesize": source.synthesize,
                 "evidence_blocks": len(source.blocks),
                 "evidence_sha256": digest([asdict(block) for block in source.blocks]),
             }

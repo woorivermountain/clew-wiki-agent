@@ -254,7 +254,7 @@ class WikiService:
         result = job.get("result") or {}
         reasons = list(result.get("findings") or [])
         review = result.get("review") or {}
-        if job["status"] == "held" and review.get("reason"):
+        if job["status"] == "held" and review.get("decision") == "hold" and review.get("reason"):
             reasons.append({"code": "admission_hold", "message": review["reason"],
                             "evidence_ids": review.get("evidence_ids", [])})
         if job["status"] == "held" and not reasons and result.get("children", {}).get("held"):

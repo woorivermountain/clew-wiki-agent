@@ -8,11 +8,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from clew_okf import WikiAgent
+from clew_okf.domain.errors import RequiredEvidenceMissingError
 from clew_okf.workflows.compiler import BuildInProgressError
+from clew_okf.workflows.release import ReleaseNotApprovedError, read_approved_release
+from clew_okf.interfaces.studio import create_studio_router
 from clew_okf.domain.reports import ReportIdentifier, ReportRequest
 
 
@@ -23,10 +26,32 @@ class WikiBuildResponse(BaseModel):
     sources: int
     unmapped_documents: int
     selected_quotes: int
+    selected_groups: int = 0
     warnings: list[str]
     wiki_reviews: list[dict[str, Any]] = Field(default_factory=list)
     state: Literal["published", "unchanged", "reused"]
     bundle: str
+
+
+class WikiReleaseResponse(BaseModel):
+    snapshot: str
+    bundle: str
+    approved_by: str
+    approved_at: str
+    bundle_sha256: str
+    status: Literal["approved"]
+
+
+def _get_approved_release(config_path: Path, response: Response) -> dict:
+    headers = {"Cache-Control": "no-store"}
+    try:
+        release = read_approved_release(config_path)
+    except ReleaseNotApprovedError:
+        raise HTTPException(404, "사용 가능한 승인 위키를 찾을 수 없습니다.", headers=headers) from None
+    except (ValueError, OSError, yaml.YAMLError):
+        raise HTTPException(503, "위키 승인 상태를 확인하지 못했습니다.", headers=headers) from None
+    response.headers.update(headers)
+    return release
 
 
 class RawReportRequest(ReportRequest):
@@ -49,10 +74,19 @@ def create_router(agent: WikiAgent, *, prefix: str = "/wiki") -> APIRouter:
     """Use a server-configured agent and wait for its build to complete."""
     router = APIRouter(prefix=prefix, tags=["wiki"])
 
+    router.include_router(create_studio_router(agent.config_path, jobs_available=False))
+
+    @router.get("/release", response_model=WikiReleaseResponse)
+    def release(response: Response) -> dict:
+        return _get_approved_release(agent.config_path, response)
+
     @router.post("/build", response_model=WikiBuildResponse)
     def build_wiki() -> WikiBuildResponse:
         try:
             report = agent.run()
+        except RequiredEvidenceMissingError as error:
+            raise HTTPException(409, {"status": "hold", "findings": error.findings},
+                                headers={"Cache-Control": "no-store"}) from None
         except BuildInProgressError:
             raise HTTPException(409, "같은 출력 경로의 위키 빌드가 진행 중입니다.") from None
         except (ValueError, yaml.YAMLError, csv.Error):

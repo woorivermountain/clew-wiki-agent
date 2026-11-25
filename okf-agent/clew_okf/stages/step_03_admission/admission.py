@@ -11,6 +11,7 @@ from clew_okf.stages.step_03_admission.admission_review import evaluate_report
 from clew_okf.stages.step_06_publish.bundle import digest, evidence, file_key
 from clew_okf.workflows.compiler import PreparedBuild, _load_sources, prepare_build, publish_build
 from clew_okf.stages.step_02_mapping.mapped_reports import dependency_digest, mapped_sources, mapping_settings, scoped_input
+from clew_okf.domain.errors import RequiredEvidenceMissingError
 from clew_okf.domain.model import Source
 from clew_okf.runtime.progress import emit
 from clew_okf.domain.report_index import active_entries, read_index, report_hash
@@ -168,6 +169,8 @@ def _admit(context: PreparedBuild, report: ReportRecord, entries: list[dict], *,
     try:
         verify_sources()
         build = publish_build(context, [*entries, entry], verify_before_publish=verify_sources)
+    except RequiredEvidenceMissingError as error:
+        return _response(report, "hold", error.findings, review=review)
     except _SourceChanged as error:
         return _response(report, "conflict", [_finding("source_changed", str(error))], review=review)
     action = "update" if any(row["report"]["report_id"] == report.report_id for row in entries) else review["decision"]
