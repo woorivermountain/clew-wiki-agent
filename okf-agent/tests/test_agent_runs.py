@@ -105,6 +105,20 @@ class AgentRunTests(unittest.TestCase):
         self.assertEqual(stored["steps"][1]["details"], {"hits": 2})
         self.assertEqual(stored["started_at"], "2026-11-25T00:00:00.000000+00:00")
 
+    def test_model_steps_are_recorded_without_claiming_external_execution(self):
+        completed = _run(status="completed")
+        completed["steps"].append({
+            "kind": "llm", "name": "response.model", "source": "BE/chat::compose",
+            "at": "2026-11-25T00:00:02Z", "status": "completed", "duration_ms": 120,
+            "details": {"provider": "provider-name", "model": "model-id", "output_tokens": 17},
+        })
+        forged = {**completed, "origin": "wiki_evaluation"}
+        self.assertEqual(self.post(forged).status_code, 422)
+        self.assertEqual(self.post(completed).status_code, 204)
+        stored = self.client.get(_URL + "/request-1", headers=_ADMIN).json()
+        self.assertEqual(stored["steps"][1]["duration_ms"], 120)
+        self.assertEqual(stored["steps"][1]["details"]["model"], "model-id")
+
     def test_recent_summary_filters_and_never_contains_chat_content(self):
         self.assertEqual(self.post(_run(status="completed")).status_code, 204)
         self.assertEqual(self.post(_run("request-2", "session-2", minute="30")).status_code, 204)

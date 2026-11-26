@@ -318,6 +318,19 @@ def write_bundle(
             refs.append(_source_entry(identifier, source.resource, source.title))
             definitions.append(_citation(identifier, source.title, block.locator, source.revision, source.resource))
         fields["sources"] = refs
+        if used_groups:
+            fields["clew_evidence_groups"] = [
+                {
+                    "id": group.identifier.removeprefix("group-"),
+                    "label": group.label,
+                    "required": group.required,
+                    "evidence": [
+                        {"evidence_id": identifier, "quote": quote}
+                        for identifier, quote in group.spans
+                    ],
+                }
+                for identifier, group in equipment_groups.items() if identifier in used_groups
+            ]
         review_entry = {"equipment_key": item.key, **review_data} if review_data is not None else None
         return path, (label, document(fields, lines + definitions)), len(ordered_claims), len(draft_groups), review_entry
 

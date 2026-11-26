@@ -31,6 +31,8 @@ _ASSET_TYPES = {
     "studio.css": "text/css",
     "studio.js": "text/javascript",
     "studio_runs.js": "text/javascript",
+    "studio_runs.css": "text/css",
+    "studio_evidence.css": "text/css",
     "studio_graph.js": "text/javascript",
     "studio_lineage.js": "text/javascript",
     "studio_context.js": "text/javascript",
@@ -58,7 +60,7 @@ def _plain(value: str) -> str:
     return re.sub(r"\\([\\`*_{\[\]<>}|])", r"\1", value)
 
 
-def _page_document(path: Path, relative: str) -> tuple[dict, str]:
+def _page_document(path: Path, relative: str) -> tuple[dict, str, list]:
     if path.is_symlink() or path.resolve() != path:
         raise FileNotFoundError
     raw = path.read_text(encoding="utf-8")
@@ -75,7 +77,7 @@ def _page_document(path: Path, relative: str) -> tuple[dict, str]:
         "equipment_ids": fields.get("equipment_ids", []),
         "source_key": fields.get("source_key"),
     }
-    return metadata, body
+    return metadata, body, fields.get("clew_evidence_groups", [])
 
 
 def _local_target(path: str, target: str) -> str | None:
@@ -108,7 +110,7 @@ def _catalog(bundle: Path, files: tuple[tuple[str, int, int, int, int], ...]) ->
     sources = {}
     known = {relative for relative, *_ in files}
     for relative, *_ in files:
-        page, body = _page_document(bundle / relative, relative)
+        page, body, _ = _page_document(bundle / relative, relative)
         pages.append(page)
         visible = _unfenced(body)
         targets = {_local_target(relative, target) for target in LINK.findall(visible)}
@@ -186,7 +188,50 @@ def _load_asset(name: str, content_type: str) -> FileResponse:
     return FileResponse(asset, media_type=content_type, headers=_NO_STORE)
 
 
-def create_studio_router(config_path: Path, *, jobs_available: bool) -> APIRouter:
+@dataclass(frozen=True)
+class StudioEvaluation:
+    """Read-only supplemental records for a known draft from a separate evaluation."""
+
+    snapshot: str
+    groups: dict[str, list[dict]]
+    records: tuple[dict, ...]
+
+
+def _claim_groups(raw: list, evidence: list[dict]) -> list[dict]:
+    known = {item["id"]: item for item in evidence}
+    return [
+        {
+            **group,
+            "relationship": "selected",
+            "evidence": [
+                {**known[span["evidence_id"]], **span}
+                for span in group["evidence"] if span["evidence_id"] in known
+            ],
+        }
+        for group in raw
+    ]
+
+
+def _build_details(snapshot: _Snapshot, equipment_key: str | None, records: tuple[dict, ...]) -> dict:
+    manifest = snapshot.manifest
+    review = next(
+        (entry for entry in manifest.get("wiki_reviews", []) if entry["equipment_key"] == equipment_key),
+        None,
+    )
+    return {
+        "snapshot": manifest["snapshot"],
+        "generated_at": manifest.get("generated_at"),
+        "review": review,
+        "executions": [entry for entry in records if entry.get("equipment_key") in (None, equipment_key)],
+        "approval": {
+            key: snapshot.approval[key] for key in ("approved_by", "approved_at")
+        } if snapshot.approval else None,
+    }
+
+
+def create_studio_router(
+    config_path: Path, *, jobs_available: bool, evaluation: StudioEvaluation | None = None,
+) -> APIRouter:
     """Reuse the configured wiki router's dependencies and output directory."""
     router = APIRouter(prefix="/studio", tags=["wiki-studio"])
 
@@ -222,6 +267,9 @@ def create_studio_router(config_path: Path, *, jobs_available: bool) -> APIRoute
             "links": catalog.links if catalog else (),
             "reviews": selected.manifest.get("wiki_reviews", []) if selected else [],
             "jobs_available": jobs_available,
+            "work_records": evaluation.records if evaluation and view == "draft" and
+            selected and selected.manifest["snapshot"] == evaluation.snapshot else (),
+            "evaluation_lookup": evaluation is not None,
         }
 
     @router.get("/page")
@@ -242,12 +290,18 @@ def create_studio_router(config_path: Path, *, jobs_available: bool) -> APIRoute
             catalog = _get_catalog(selected)
             if catalog is None or not any(meta["path"] == path for meta in catalog.pages):
                 raise HTTPException(404, "위키 문서를 찾을 수 없습니다.", headers=_NO_STORE)
-            metadata, body = _page_document(selected.bundle / path, path)
+            metadata, body, raw_groups = _page_document(selected.bundle / path, path)
             markdown = _LOCAL_URI.sub("원본 보관 위치", _FILE_LINK.sub("", body)).lstrip("\n")
         except FileNotFoundError:
             raise HTTPException(404, "위키 문서를 찾을 수 없습니다.", headers=_NO_STORE) from None
         except (OSError, ValueError, yaml.YAMLError):
             raise HTTPException(503, "위키 문서를 불러오지 못했습니다.", headers=_NO_STORE) from None
+        evidence = _evidence(markdown, catalog)
+        groups = _claim_groups(raw_groups, evidence)
+        records = ()
+        if evaluation and view == "draft" and snapshot_id == evaluation.snapshot:
+            groups.extend(evaluation.groups.get(metadata["equipment_key"], ()))
+            records = evaluation.records
         response.headers.update(_NO_STORE)
         return {
             **metadata,
@@ -255,7 +309,9 @@ def create_studio_router(config_path: Path, *, jobs_available: bool) -> APIRoute
             "markdown": markdown,
             "links": [link["target"] for link in catalog.links if link["source"] == path],
             "backlinks": [link["source"] for link in catalog.links if link["target"] == path],
-            "evidence": _evidence(markdown, catalog),
+            "evidence": evidence,
+            "structured_evidence": {"groups": groups},
+            "build": _build_details(selected, metadata["equipment_key"], records),
         }
 
     return router

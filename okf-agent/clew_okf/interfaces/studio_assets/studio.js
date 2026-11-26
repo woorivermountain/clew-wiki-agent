@@ -20,6 +20,7 @@ const state = {
   overviewRequest: 0, pageRequest: 0, jobError: false,
   tabs: {draft: [], approved: []}, scrollByPage: new Map(), split: null, splitRequest: 0,
   graphScope: "local", graphDepth: 1, graphLabels: true, graphQuery: "", contextPath: "",
+  connections: "documents", flow: "wiki", recordId: null,
 };
 
 function node(tag, className, text) {
@@ -128,6 +129,63 @@ function inspectIssue(page, issue) {
   const sources = (issue.evidence_ids || []).map((id) => page.evidence.find((source) => source.id === id)).filter(Boolean);
   contextDock.open({key: page.path + ":issue:" + issue.claim_id + ":" + issue.category,
     title: page.title + " · " + issueTitle(issue.category), note: issue.message, sources});
+}
+
+
+function citedSources(page, text) {
+  const ids = new Set([...text.matchAll(/\[\^(src-[a-f0-9]{24})\]/g)].map((item) => item[1]));
+  return page.evidence.filter((item) => ids.has(item.id));
+}
+
+function claimText(value) {
+  return unescapeInline(value.replace(/\s*\[\^src-[a-f0-9]{24}\]/g, "").replace(/\*\*([^*]+)\*\*/g, "$1")).trim();
+}
+
+function evidenceTextKey(value) {
+  return (value || "").normalize("NFKC").toLowerCase().replace(/[\s|\\]/g, "");
+}
+
+function inspectClaim(page, text, section, claimId, key) {
+  const sources = citedSources(page, text);
+  const selection = claimText(text);
+  const comparable = evidenceTextKey(selection);
+  const ids = new Set(sources.map((source) => source.id));
+  const groups = (page.structured_evidence?.groups || []).filter((group) =>
+    group.label === selection || (group.evidence || []).some((span) => {
+      const content = evidenceTextKey(span.quote);
+      return ids.has(span.evidence_id || span.id) && content.length > 0 && comparable.includes(content);
+    })
+  );
+  const issues = (reviewFor(page)?.issues || []).filter((item) => item.claim_id === claimId);
+  const issueIds = new Set(issues.flatMap((item) => item.evidence_ids || []));
+  contextDock.open({
+    key: [page.snapshot, page.path, key].join(":"),
+    path: page.path,
+    page,
+    title: "문장 근거 · " + (page.equipment_key?.split("/").at(-1) || page.title),
+    defaultView: "claim",
+    claim: {selection, section, claimId, key, groups, issues, reviewSources: page.evidence.filter((source) => issueIds.has(source.id))},
+    sources,
+  });
+}
+
+function addClaimAction(element, page, text, section, claimId, key) {
+  if (!claimText(text)) return;
+  const open = () => inspectClaim(page, text, section, claimId, key);
+  element.classList.add("wiki-claim");
+  element.dataset.claimKey = key;
+  element.dataset.claimPage = page.path;
+  const trigger = button("", "wiki-claim-trigger", open, "info");
+  trigger.title = "문장 근거와 실행 기록";
+  trigger.setAttribute("aria-label", "문장 근거와 실행 기록 · " + claimText(text).slice(0, 100));
+  trigger.setAttribute("aria-controls", "context-dock");
+  trigger.setAttribute("aria-pressed", "false");
+  element.append(" ", trigger);
+  element.addEventListener("click", (event) => {
+    if (event.defaultPrevented || event.target.closest("a,button") || !window.getSelection()?.isCollapsed) return;
+    // Nested Markdown list items each own their context.
+    if (event.target.closest(".wiki-claim") === element) open();
+  });
 }
 
 function showNotice(message = "") {
@@ -368,7 +426,17 @@ function parseMarkdown(page, pane = "") {
   let fence = null;
   let section = "";
   let claims = 0;
+  let blockIndex = 0;
   let paragraph = null;
+  let paragraphText = "";
+  let paragraphSection = "";
+  const workingWithClaims = Boolean(page.equipment_key);
+  const finishParagraph = () => {
+    if (paragraph && workingWithClaims && claimSections.has(paragraphSection))
+      addClaimAction(paragraph, page, paragraphText, paragraphSection, null, "block-" + (++blockIndex));
+    paragraph = null;
+    paragraphText = "";
+  };
   let titleSeen = false;
   let headingCount = 0;
   const add = (element, text) => {
@@ -394,14 +462,14 @@ function parseMarkdown(page, pane = "") {
       content.append(pre);
       fence = {mark: marker[1], block, buffer: []};
       list = [];
-      paragraph = null;
+      finishParagraph();
       continue;
     }
     if (/^\[\^src-[a-f0-9]{24}\]:/.test(row)) continue;
     const heading = row.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
       list = [];
-      paragraph = null;
+      finishParagraph();
       const level = heading[1].length;
       if (level === 1 && !titleSeen) {
         titleSeen = true;
@@ -420,7 +488,7 @@ function parseMarkdown(page, pane = "") {
     }
     const bullet = row.match(/^(\s*)([-*]|\d+\.)\s+(.*)$/);
     if (bullet) {
-      paragraph = null;
+      finishParagraph();
       const depth = Math.min(Math.floor(bullet[1].length / 2), list.length);
       const kind = /^\d/.test(bullet[2]) ? "ol" : "ul";
       list = list.slice(0, depth + 1);
@@ -439,25 +507,31 @@ function parseMarkdown(page, pane = "") {
       const item = node("li");
       const isIssue = info.startsWith("**검토 필요**");
       if (isIssue) item.className = "inline-issue";
-      if (claimSections.has(section) && !isIssue && /\[\^src-[a-f0-9]{24}\]/.test(info))
-        item.id = (pane ? pane + "-" : "") + "claim-" + (++claims);
+      const isClaim = claimSections.has(section) && !isIssue;
+      const claimId = isClaim && /\[\^src-[a-f0-9]{24}\]/.test(info) ? ++claims : null;
+      if (claimId) item.id = (pane ? pane + "-" : "") + "claim-" + claimId;
       appendInline(item, info, page);
+      if (workingWithClaims && isClaim)
+        addClaimAction(item, page, info, section, claimId, "block-" + (++blockIndex));
       list[depth].container.append(item);
       list[depth].last = item;
       continue;
     }
     if (!row.trim()) {
       list = [];
-      paragraph = null;
+      finishParagraph();
       continue;
     }
     list = [];
     if (!paragraph) {
       paragraph = node("p");
+      paragraphSection = section;
       content.append(paragraph);
     } else paragraph.append(" ");
+    paragraphText += (paragraphText ? " " : "") + row;
     appendInline(paragraph, row, page);
   }
+  finishParagraph();
   if (fence) fence.block.textContent = fence.buffer.join("\n");
   return {content, headings};
 }
@@ -568,6 +642,9 @@ function renderDocument() {
     button("검토·근거", "tool-toggle mobile-inspect-link", () => switchInspector(state.inspector, true), "panel"),
     raw
   );
+  if (page.equipment_key) tools.prepend(
+    button("데이터 흐름", "tool-toggle", () => changeMode("lineage"), "graph"),
+  );
   toolbar.append(crumb, tools);
   const meta = node("div", "document-meta");
   meta.append(chip(state.view === "approved" ? "운영 승인본" : "검토용 초안", state.view === "approved" ? "good" : ""));
@@ -603,6 +680,11 @@ function renderDocument() {
       toc.append(link);
     }
     frame.append(toc);
+  }
+  if (page.equipment_key && content.querySelector(".wiki-claim")) {
+    const hint = node("p", "wiki-claim-hint");
+    hint.append(icon("info"), "문장을 선택하면 하단에서 원문과 작성·검토 기록을 볼 수 있습니다.");
+    frame.append(hint);
   }
   frame.append(content);
   $("#view").replaceChildren(frame);
@@ -841,15 +923,73 @@ function chooseGraphNode(path) {
   inspectDocument(path);
 }
 
+function connectionSwitch() {
+  const controls = node("div", "connection-switch");
+  for (const [value, label] of [["documents", "문서 참조"], ["workflow", "업무 의존성"]]) {
+    controls.append(graphFilter(label, value, state.connections, () => {
+      state.connections = value;
+      renderGraph();
+      $(".connection-switch [data-filter=" + value + "]")?.focus();
+    }));
+  }
+  return controls;
+}
+
+const workflowPaths = {
+  wiki: [
+    ["원본 등록", "runtime/worker.py::WikiWorker.run_once", "접수한 보고서나 빌드 작업을 읽고 처리 상태를 기록합니다.", "jobs", "clock"],
+    ["필드 매핑과 편입 검증", "stages/step_03_admission/admission.py::_admit", "공통 필드의 원문, 설비 범위, 유사·중복과 개정 충돌을 검사합니다.", "jobs", "check"],
+    ["위키 작성과 독립 검토", "stages/step_06_publish/bundle.py::write_bundle", "설정한 모델로 원문을 인용하고 검토합니다. 필수 묶음이 없으면 스냅샷 교체 전에 보류합니다.", "lineage", "code"],
+    ["승인과 게시 범위", "workflows/release.py::approve_release", "운영 승인에는 검토한 스냅샷 ID와 해시가 일치해야 합니다.", "document", "book"],
+  ],
+  query: [
+    ["서비스 질의", "interfaces/agent_runs.py::create_agent_runs_router", "외부 FastAPI가 질의별 실행 ID와 관측한 단계를 전달합니다.", "agent-runs", "clock"],
+    ["운영 승인 확인", "interfaces/chat_lookup.py::lookup_approved_equipment", "운영 조회에 사용할 승인본과 무결성을 확인합니다.", "lineage", "check"],
+    ["설비와 근거 찾기", "interfaces/chat_lookup.py::lookup_wiki_bundle", "공장·설비 키와 연결된 문서를 조회하고 채택 가능한 원문 범위를 집계합니다.", "document", "file"],
+    ["응답과 실행 기록", "interfaces/agent_runs.py::create_agent_runs_router", "응답과 호출 모델, 도구, 룰은 서비스가 전송한 실제 단계에서 확인합니다.", "agent-runs", "code"],
+  ],
+};
+
+function renderWorkflow() {
+  const main = node("section", "wide-view workflow-view");
+  const scopes = node("div", "connection-switch");
+  for (const [value, label] of [["wiki", "보고서·위키 생성"], ["query", "질의·근거 조회"]]) {
+    scopes.append(graphFilter(label, value, state.flow, () => {
+      state.flow = value;
+      renderWorkflow();
+      $(".workflow-view .connection-switch + .connection-switch [data-filter=" + value + "]")?.focus();
+    }));
+  }
+  const sequence = node("ol", "workflow-sequence");
+  for (const [label, code, description, mode, glyph] of workflowPaths[state.flow]) {
+    const item = node("li");
+    const entry = button(label, "workflow-node", () => contextDock.open({
+      key: "dependency:" + code + ":" + label, title: label, note: description,
+      logic: code, workspaceMode: mode, defaultView: "logic",
+    }), glyph);
+    entry.append(node("span", "", code));
+    item.append(entry);
+    sequence.append(item);
+  }
+  main.append(node("h1", "", "업무 의존성"), node("p", "view-intro",
+    "코드에 정의된 처리 흐름입니다. 단계를 선택하면 하단에서 관련 코드와 실제 기록이 있는 화면을 열 수 있습니다."),
+    connectionSwitch(), scopes, sequence);
+  $("#view").replaceChildren(main);
+}
+
 function renderGraph() {
   leaveGraph();
+  if (state.connections === "workflow") {
+    renderWorkflow();
+    return;
+  }
   const page = state.page;
   if (!page) {
     renderEmpty("문서 연결", state.path ? "문서 연결을 불러오는 중입니다." : "스냅샷에 문서가 있으면 실제 참조 관계를 볼 수 있습니다.");
     return;
   }
   const main = node("section", "wide-view graph-view");
-  main.append(node("h1", "", "문서 연결"));
+  main.append(node("h1", "", "문서 연결"), connectionSwitch());
   const controls = node("div", "network-controls");
   const scopes = node("div", "graph-controls");
   for (const [value, label] of [["local", "현재 문서"], ["all", "전체 위키"]]) {
@@ -1020,14 +1160,17 @@ function renderLineage() {
     setScale(scale + (event.deltaY > 0 ? -.06 : .06));
   }, {passive: false});
   const guide = node("div", "lineage-legend");
-  guide.append(node("span", "", "실선 인용·검토"), node("span", "muted-dash", "점선 참고 링크"));
+  guide.append(node("span", "", "실선 인용·검토·생성"), node("span", "muted-dash", "점선 참고 링크·별도 평가"));
   main.append(heading, toolbar, viewport, guide);
   $("#view").replaceChildren(main);
   if (window.ClewLineage) {
     lineageSession = window.ClewLineage.mount(surface, {
       page, overview: state.overview, view: state.view,
+      executions: executionsFor(page),
       getDocument: (path) => state.documents.get(path),
-      onSelect: (entry) => contextDock.open({...entry, defaultView: entry.path || entry.sources?.length ? "data" : "reading"}),
+      onSelect: (entry) => contextDock.open({
+        ...entry, defaultView: entry.defaultView || (entry.path || entry.sources?.length ? "data" : "reading"),
+      }),
     });
   } else {
     surface.append(node("p", "empty-copy", "데이터 흐름을 불러오지 못했습니다."));
@@ -1125,9 +1268,101 @@ async function showJobEvents(job, panel) {
   }
 }
 
+function openWorkRecord(record) {
+  if (!record?.id) return;
+  state.recordId = record.id;
+  state.jobFilter = "all";
+  if (record.job_id && state.jobs?.some((job) => job.id === record.job_id)) {
+    state.expandedJobs.add(record.job_id);
+    state.selectedJob = record.job_id;
+  }
+  if (state.mode === "jobs") renderJobs();
+  else changeMode("jobs");
+  requestAnimationFrame(() => scrollToItem($$("[data-record]").find((element) => element.dataset.record === record.id)));
+}
+
+function executionsFor(page) {
+  const records = page.build?.executions || [];
+  const found = [];
+  for (const job of state.jobs || []) {
+    const result = job.result?.build || job.result;
+    const exact = result?.snapshot === page.snapshot;
+    const findings = (job.hold_reasons || job.result?.findings || [])
+      .filter((finding) => page.equipment_key && finding.equipment_key === page.equipment_key);
+    if (!exact && (state.view !== "draft" || job.status !== "held" || !findings.length)) continue;
+    if (records.some((record) => record.id === job.id)) continue;
+    found.push({
+      id: job.id, job_id: job.id, title: jobName(job), status: job.status,
+      scope: exact ? "이 스냅샷의 작업" : "별도 처리 시도", snapshot: exact ? page.snapshot : null,
+      generated_at: job.finished_at || job.updated_at, findings,
+    });
+  }
+  return [...records, ...found];
+}
+
+function workHistory(records) {
+  const history = node("section", "record-archive");
+  history.append(node("h2", "", "저장된 평가 실행"), node("p", "small-print",
+    "현재 전체 초안의 생성과 별도로 실행한 P6 검증 이력을 확인합니다."));
+  const list = node("div", "job-list");
+  for (const record of records) {
+    const entry = node("details", "archive-record");
+    entry.dataset.record = record.id;
+    entry.open = record.id === state.recordId;
+    entry.addEventListener("toggle", () => {
+      if (entry.open) state.recordId = record.id;
+      else if (state.recordId === record.id) state.recordId = null;
+    });
+    const summary = node("summary");
+    const title = node("span", "job-title");
+    title.append(icon("chevron"), node("span", "", record.title));
+    summary.append(chip(...jobStatus(record.status)), title, node("time", "job-time", date(record.generated_at)));
+    const detail = node("div", "job-content");
+    const metadata = [
+      record.scope, record.model,
+      record.calls == null ? null : "모델 호출 " + record.calls + "회",
+      record.duration_seconds == null ? null : Number(record.duration_seconds).toLocaleString("ko-KR", {maximumFractionDigits: 1}) + "초",
+    ];
+    detail.append(node("p", "small-print", metadata.filter(Boolean).join(" · ")));
+    const snapshot = record.snapshot || record.retained_snapshot;
+    if (snapshot) {
+      detail.append(node("p", "archive-snapshot", (record.snapshot ? "생성 스냅샷 " : "유지한 스냅샷 ") + snapshot));
+    }
+    if (record.note) detail.append(node("p", "", record.note));
+    if (record.call_roles) {
+      detail.append(node("p", "small-print", Object.entries(record.call_roles)
+        .map(([role, count]) => ({write: "작성", review: "검토"}[role] || role) + " " + count + "회").join(" · ")));
+    }
+    for (const finding of record.findings || []) detail.append(findingCard(finding));
+    if (record.events?.length) {
+      const events = node("ol", "event-list");
+      for (const event of record.events) {
+        const row = node("li");
+        row.append(node("strong", "", stageLabel(event.stage)), node("time", "", date(event.created_at)));
+        events.append(row);
+      }
+      const timeline = node("section", "job-timeline");
+      timeline.append(node("h2", "", "실제 처리 단계"), events);
+      detail.append(timeline);
+    }
+    const assetPage = [...state.documents.values()].find((page) => record.equipment_key && page.equipment_key === record.equipment_key);
+    if (assetPage) detail.append(button("P6 문서에서 보기", "text-button", () => navigate(assetPage.path), "book"));
+    entry.append(summary, detail);
+    list.append(entry);
+  }
+  history.append(list);
+  return history;
+}
+
 function renderJobs(target = $("#view"), {embedded = false} = {}) {
   const main = node("section", embedded ? "runs-wiki-jobs" : "wide-view");
   if (!embedded) main.append(node("h1", "", "작업 기록"), node("p", "view-intro", "위키 생성과 보고서 편입의 처리 상태를 확인합니다."));
+  const records = state.overview?.work_records || [];
+  if (records.length) main.append(workHistory(records));
+  if (!state.overview?.jobs_available && records.length) {
+    target.replaceChildren(main);
+    return;
+  }
   if (!state.overview?.jobs_available || state.jobError || state.jobs === null) {
     const explanation = !state.overview ? state.overviewError ? "서버에서 작업 조회 설정을 불러오지 못했습니다." : "작업 조회 설정을 확인하는 중입니다." :
       !state.overview.jobs_available ? "이 서버에서는 비동기 작업 조회를 연결할 수 없습니다." :
@@ -1156,6 +1391,7 @@ function renderJobs(target = $("#view"), {embedded = false} = {}) {
   if (!currentJobs.length) list.append(node("p", "empty-copy", "표시할 작업 기록이 없습니다."));
   for (const job of currentJobs) {
     const item = node("details");
+    item.dataset.record = job.id;
     item.open = state.expandedJobs.has(job.id);
     const timeline = node("section", "job-timeline");
     item.addEventListener("toggle", () => {
@@ -1365,8 +1601,17 @@ const agentRuns = window.ClewRuns.create({
   renderJobs: (target) => renderJobs(target, {embedded: true}),
   fetchJobs: () => state.overview ? fetchJobs() : loadOverview(),
   isActive: () => state.mode === "agent-runs",
-  wikiPageUrl: (path, snapshot) => snapshot && snapshot === state.overview?.approved?.snapshot ?
-    "#" + new URLSearchParams({view: "approved", screen: "document", page: path}) : null,
+  isEvaluation: () => Boolean(state.overview?.evaluation_lookup),
+  wikiPageUrl: (path, snapshot) => {
+    const view = snapshot && snapshot === state.overview?.approved?.snapshot ? "approved" :
+      state.overview?.evaluation_lookup && snapshot === state.overview?.draft?.snapshot ? "draft" : null;
+    return view ? "#" + new URLSearchParams({view, screen: "document", page: path}) : null;
+  },
+  openWikiEvidence: (path, snapshot) => {
+    if (snapshot !== currentSnapshot()?.snapshot || !state.documents.has(path)) return false;
+    inspectDocument(path, {defaultView: "data"});
+    return true;
+  },
 });
 const contextDock = window.ClewContext.create($("#context-dock"), {
   getPage: getSnapshotPage,
@@ -1379,8 +1624,18 @@ const contextDock = window.ClewContext.create($("#context-dock"), {
   onTab: (entry) => navigate(entry.path, {anchor: entry.anchor}),
   onPin: (entry) => openSplit(entry.path, entry.anchor),
   onGraph: (entry) => navigate(entry.path, {mode: "graph"}),
+  onWorkspace: changeMode,
+  executionsFor,
+  onWorkRecord: (execution) => {
+    if (typeof openWorkRecord === "function") openWorkRecord(execution);
+  },
   onChange: (entry) => {
     state.contextPath = entry?.path || "";
+    for (const item of $$(".wiki-claim[data-claim-page]")) {
+      const active = item.dataset.claimPage === entry?.path && item.dataset.claimKey === entry?.claim?.key;
+      item.classList.toggle("claim-active", active);
+      item.querySelector(":scope > .wiki-claim-trigger")?.setAttribute("aria-pressed", String(active));
+    }
     for (const item of $$(".tree-item[data-document-path]")) {
       item.classList.toggle("context-selection", item.dataset.documentPath === state.contextPath);
     }

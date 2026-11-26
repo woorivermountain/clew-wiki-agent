@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 import os
 from pathlib import Path
@@ -45,21 +46,23 @@ class _ChatResponse(_StrictModel):
     error: _Label | None = None
 
 
-class _Step(_StrictModel):
-    kind: Literal["chat", "code", "rule", "agent", "tool", "wiki"]
+class AgentRunStep(_StrictModel):
+    kind: Literal["chat", "code", "rule", "agent", "tool", "wiki", "llm"]
     name: _Label
     source: Annotated[str, StringConstraints(min_length=1, max_length=512)]
     at: AwareDatetime
     status: Literal["completed", "skipped", "failed"]
     details: dict[str, JsonValue]
+    duration_ms: Annotated[int, Field(ge=0, le=86_400_000)] | None = None
 
     @field_serializer("at", when_used="json")
     def serialize_at(self, value: datetime) -> str:
         return _timestamp(value)
 
 
-class _AgentRun(_StrictModel):
+class AgentRunSnapshot(_StrictModel):
     version: Literal[1]
+    origin: Literal["clew_chat", "wiki_evaluation"] = "clew_chat"
     request_id: _RunId
     session_id: _RunId
     started_at: AwareDatetime
@@ -67,7 +70,7 @@ class _AgentRun(_StrictModel):
     status: Literal["running", "completed", "failed"]
     request: _ChatRequest
     response: _ChatResponse | None
-    steps: Annotated[list[_Step], Field(max_length=64)]
+    steps: Annotated[list[AgentRunStep], Field(max_length=64)]
 
     @model_validator(mode="after")
     def consistent_timeline(self):
@@ -107,23 +110,28 @@ def _require_ingest(credential: Annotated[HTTPAuthorizationCredentials | None, D
     _authorize("CLEW_MONITOR_INGEST_TOKEN", credential)
 
 
-def _require_admin(credential: Annotated[HTTPAuthorizationCredentials | None, Depends(_admin_bearer)]) -> None:
+def require_agent_run_admin(credential: Annotated[HTTPAuthorizationCredentials | None, Depends(_admin_bearer)]) -> None:
     _authorize("CLEW_MONITOR_ADMIN_TOKEN", credential)
 
 
-async def _read_snapshot(request: Request) -> _AgentRun:
+async def _read_snapshot(request: Request) -> AgentRunSnapshot:
     body = bytearray()
     async for chunk in request.stream():
         if len(body) + len(chunk) > _MAX_BYTES:
             raise HTTPException(413, "실행 기록이 요청 크기 한도를 넘었습니다.", headers=_PRIVATE)
         body.extend(chunk)
     try:
-        return _AgentRun.model_validate_json(body)
+        run = AgentRunSnapshot.model_validate_json(body)
     except ValidationError:
         raise HTTPException(422, "실행 기록 형식이 올바르지 않습니다.", headers=_PRIVATE) from None
+    if run.origin != "clew_chat":
+        raise HTTPException(422, "수집 API는 서비스 질의 기록을 받습니다.", headers=_PRIVATE)
+    return run
 
 
-def create_agent_runs_router(state_dir: Path) -> APIRouter:
+def create_agent_runs_router(
+    state_dir: Path, *, read_dependency: Callable[..., None] = require_agent_run_admin,
+) -> APIRouter:
     store = AgentRunStore(state_dir)
     router = APIRouter(prefix="/agent-runs", tags=["agent-runs"])
 
@@ -138,11 +146,11 @@ def create_agent_runs_router(state_dir: Path) -> APIRouter:
             raise HTTPException(422, "실행 기록 형식이 올바르지 않습니다.", headers=_PRIVATE) from None
         return Response(status_code=204, headers=_PRIVATE)
 
-    @router.get("", dependencies=[Depends(_require_admin)])
+    @router.get("", dependencies=[Depends(read_dependency)])
     def recent(limit: Annotated[int, Query(ge=1, le=200)] = 50, session_id: _RunId | None = None):
         return JSONResponse({"runs": store.recent(limit, session_id)}, headers=_PRIVATE)
 
-    @router.get("/{request_id}", dependencies=[Depends(_require_admin)])
+    @router.get("/{request_id}", dependencies=[Depends(read_dependency)])
     def detail(request_id: _RunId):
         run = store.get(request_id)
         if run is None:

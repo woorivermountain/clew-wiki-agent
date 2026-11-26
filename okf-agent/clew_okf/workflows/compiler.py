@@ -319,7 +319,10 @@ def publish_build(
         "sources": [asdict(source) for source in sources],
         "equipment": [asdict(item) for item in equipment],
         "warnings": warnings,
-        "synthesis": {"settings": synthesis, "protocol": "quote-annotations-v5"} if synthesis is not None else None,
+        "synthesis": {
+            "settings": synthesis,
+            "protocol": "quote-annotations-v6" if "structured_evidence" in synthesis else "quote-annotations-v5",
+        } if synthesis is not None else None,
     })
     snapshots = output / "snapshots"
     snapshots.mkdir(exist_ok=True)

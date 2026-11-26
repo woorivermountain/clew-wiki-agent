@@ -67,7 +67,7 @@
     return [...groups.values()].sort((a, b) => b.used - a.used || a.title.localeCompare(b.title, "ko"));
   }
 
-  function mount(host, {page, overview, view, getDocument, onSelect}) {
+  function mount(host, {page, overview, view, executions, getDocument, onSelect}) {
     const id = "lineage-arrow-" + (++boardId);
     const board = element("div", "lineage-board");
     const wires = vector("svg", {class: "lineage-wires", "aria-hidden": "true"});
@@ -140,7 +140,7 @@
           d: "M " + x1 + " " + y1 + " C " + midpoint + " " + y1 + ", " + midpoint + " " + y2 + ", " + x2 + " " + y2,
           class: "lineage-wire lineage-wire-" + role,
           fill: "none", stroke: "#819d90", "stroke-width": "1.2",
-          "stroke-dasharray": role === "related" ? "3 4" : "none",
+          "stroke-dasharray": role === "related" || role === "evaluation" ? "3 4" : "none",
           "marker-end": "url(#" + id + ")",
         }));
       }
@@ -151,6 +151,7 @@
     const cited = new Set(sources.map((group) => group.path).filter(Boolean));
     const related = (page.links || []).filter((path) => path !== page.path && !cited.has(path));
     const sourcesCol = lane("참고 원문", "sources", sources.length);
+    const buildCol = lane("생성·검증", "build");
     const pageCol = lane(page.equipment_key ? "설비 문서" : "위키 문서", "document");
     const reviewCol = lane("검토 기록", "review");
     const approvalCol = lane("스냅샷 승인", "approval");
@@ -202,6 +203,40 @@
       sourcesCol.append(element("p", "lineage-empty", "표시할 인용·참조가 없습니다."));
     }
 
+    for (const group of page.structured_evidence?.groups || []) {
+      const original = group.relationship === "selected";
+      const groupCard = card(sourcesCol, {
+        label: group.label, badge: original ? "채택 근거 묶음" : "별도 검증 원문",
+        meta: (group.evidence || []).length + "개 구절",
+        role: original ? "source" : "related", glyphName: "file",
+        details: {
+          key: "lineage:group:" + group.id + ":" + page.snapshot, title: group.label,
+          note: original ? "이 스냅샷에 함께 채택한 근거입니다." :
+            "별도 검증에서 확인한 조건입니다. 현재 초안과 동일한 원문 개정 및 추출 지문으로 연결됩니다.",
+          sources: group.evidence,
+        },
+      });
+      paths.push({from: groupCard, to: activePage, role: original ? "cited" : "evaluation"});
+    }
+    const generation = {
+      snapshot: page.snapshot, generated_at: page.build?.generated_at,
+      model: page.build?.review?.writer_model, title: view === "approved" ? "운영 승인본 생성" : "현재 초안 생성",
+    };
+    const records = executions || page.build?.executions || [];
+    for (const run of records.length ? records : [generation]) {
+      const current = run.snapshot === page.snapshot;
+      const held = run.status === "held";
+      const buildCard = card(buildCol, {
+        label: run.title, badge: current ? "현재 스냅샷" : held ? "보류 · 별도 실행" : "완료 · 별도 실행",
+        meta: [run.model, run.snapshot?.slice(0, 10)].filter(Boolean).join(" · "),
+        role: held ? "attention" : current ? "document" : "related", glyphName: held ? "alert" : "clock",
+        details: {
+          key: "lineage:build:" + (run.id || run.snapshot), title: run.title,
+          note: run.note, execution: run, defaultView: "work",
+        },
+      });
+      if (current) paths.push({from: buildCard, to: activePage, role: "build"});
+    }
     if (review) {
       const issues = review.issues || [];
       const evidenceIds = new Set(issues.flatMap((issue) => issue.evidence_ids || []));

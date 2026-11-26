@@ -93,6 +93,47 @@ class StudioApiTests(unittest.TestCase):
             self.assertEqual(evidence, {"id": issue["evidence_ids"][0], "title": "제조사 매뉴얼",
                 "revision": "Rev.3", "locator": "line 1", "path": manual["path"]})
 
+    def test_selected_evidence_groups_stay_bound_to_snapshot_and_exact_citations(self):
+        self.manual.write_text("Oil change | Interval\\nApply only when oil lubricated\\n", encoding="utf-8")
+        self.settings["synthesis"] = {
+            "endpoint": "http://127.0.0.1:11434/v1/chat/completions", "model": "fixture", "review": False,
+            "structured_evidence": [{
+                "source_key": "docs:manual.md", "protected_locators": ["line 1"], "groups": [{
+                    "id": "oil", "label": "Oil schedule", "required": True, "equipment_ids": ["REF-01/P6"],
+                    "spans": [
+                        {"locator": "line 1", "quote": "Oil change | Interval"},
+                        {"locator": "line 1", "quote": "Apply only when oil lubricated"},
+                    ],
+                }],
+            }],
+        }
+        self.write_config()
+        with patch("clew_okf.providers.llm.ChatCompletionsModel.complete", return_value={
+            "claims": [{"id": "group-oil", "section": "적용 조건", "quote": "Oil schedule"}],
+        }):
+            built = build_wiki(self.config)
+
+        app = FastAPI()
+        app.include_router(create_router(WikiAgent(self.config)))
+        with TestClient(app) as client:
+            overview = client.get("/wiki/studio/overview").json()
+            path = next(page["path"] for page in overview["pages"] if page["type"] == "Equipment")
+            response = client.get("/wiki/studio/page", params={"path": path, "snapshot": built["snapshot"]})
+            self.assertEqual(response.status_code, 200, response.text)
+            data = response.json()
+            groups = data["structured_evidence"]["groups"]
+            selected, = groups
+            self.assertEqual(selected["relationship"], "selected")
+            self.assertTrue(selected["required"])
+            self.assertEqual([span["quote"] for span in selected["evidence"]],
+                             ["Oil change | Interval", "Apply only when oil lubricated"])
+            for span in selected["evidence"]:
+                self.assertEqual(span["revision"], "Rev.3")
+                self.assertEqual(span["evidence_id"], span["id"])
+                self.assertTrue(span["path"].startswith("references/"))
+            self.assertEqual(data["build"]["snapshot"], built["snapshot"])
+            self.assertIsNone(data["build"]["approval"])
+
     def test_approved_view_stays_bound_to_its_version_and_rejects_tampering(self):
         app = FastAPI()
         app.include_router(create_router(WikiAgent(self.config)))

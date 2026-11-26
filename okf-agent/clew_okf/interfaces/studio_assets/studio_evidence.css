@@ -1,0 +1,199 @@
+.wiki-claim-hint {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 2px 0 12px;
+  color: var(--muted);
+  font-size: .77rem;
+  line-height: 1.5;
+}
+
+.wiki-claim-hint svg {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--green);
+}
+
+.content-body .wiki-claim {
+  position: relative;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.content-body .wiki-claim:hover,
+.content-body .wiki-claim.claim-active {
+  background: var(--green-soft);
+}
+
+.wiki-claim-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 23px;
+  margin-inline-start: 3px;
+  padding: 0;
+  vertical-align: middle;
+  color: var(--green-dark);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--sheet);
+}
+
+.wiki-claim-trigger:hover,
+.wiki-claim-trigger[aria-pressed="true"] {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+
+.wiki-claim-trigger svg { width: 14px; height: 14px; }
+
+.claim-selection {
+  max-width: 78ch;
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--field);
+  color: var(--ink);
+}
+
+.claim-selection-label,
+.claim-source-meta,
+.claim-scope-note,
+.claim-supplement-label {
+  margin: 0 0 5px;
+  color: var(--muted);
+  font-size: .72rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.claim-selection-label,
+.claim-supplement-label { font-weight: 720; }
+
+.claim-selection blockquote,
+.claim-source blockquote {
+  margin: 0;
+  font-size: .83rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.claim-evidence-section {
+  max-width: 88ch;
+  margin: 12px 0 0;
+  padding: 11px 0 6px;
+  border-top: 1px solid var(--line);
+}
+
+.claim-evidence-section h3,
+.claim-source h4,
+.claim-finding h4 {
+  margin: 0 0 5px;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.claim-evidence-section h3 { font-size: .86rem; }
+.claim-source h4,
+.claim-finding h4 { font-size: .77rem; }
+.claim-evidence-section > .text-button { margin-top: 6px; }
+
+.claim-source {
+  margin-top: 7px;
+  padding: 5px 0 7px;
+}
+
+.claim-source + .claim-source { border-top: 1px solid var(--line); }
+.claim-source .text-button { margin-top: 5px; }
+
+.claim-table-viewport {
+  max-width: 100%;
+  margin: 8px 0;
+  overflow: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-dark) transparent;
+}
+
+.claim-original-table {
+  width: 100%;
+  min-width: 255px;
+  border-collapse: collapse;
+  color: var(--ink);
+  font-size: .75rem;
+  line-height: 1.45;
+  text-align: start;
+}
+
+.claim-original-table caption {
+  padding: 0 0 6px;
+  color: var(--green-dark);
+  font-weight: 710;
+  text-align: start;
+  caption-side: top;
+}
+
+.claim-original-table th,
+.claim-original-table td {
+  padding: 7px 9px;
+  border: 1px solid var(--line-dark);
+  text-align: start;
+}
+
+.claim-original-table th { background: var(--field); }
+.claim-original-table .claim-cited-row { background: var(--green-soft); }
+
+.claim-source-quotes {
+  display: grid;
+  gap: 3px;
+  margin: 3px 0 5px;
+  padding-inline-start: 18px;
+  color: var(--ink);
+  font-size: .78rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.claim-source-quotes small {
+  margin-inline-start: 7px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.claim-run-facts { margin-top: 7px; }
+
+.claim-finding {
+  margin: 9px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--amber-line);
+  border-radius: 6px;
+  background: var(--amber-soft);
+}
+
+.claim-finding p {
+  margin: 4px 0;
+  color: var(--amber);
+  font-size: .76rem;
+  line-height: 1.5;
+}
+
+.claim-finding code {
+  font-size: .7rem;
+  color: var(--amber);
+  overflow-wrap: anywhere;
+}
+
+.claim-other-findings {
+  margin-top: 8px;
+  color: var(--amber);
+  font-size: .76rem;
+}
+
+.claim-other-findings summary { cursor: pointer; }
+
+@media (pointer: coarse) {
+  .wiki-claim-trigger { width: 31px; height: 30px; }
+}

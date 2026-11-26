@@ -55,6 +55,8 @@ class AgentRunStore:
     def _can_replace(previous: dict, incoming: dict) -> bool:
         if any(previous[field] != incoming[field] for field in ("session_id", "started_at", "request")):
             raise AgentRunConflict
+        if previous.get("origin", "clew_chat") != incoming.get("origin", "clew_chat"):
+            raise AgentRunConflict
         if previous == incoming:
             return False
         if previous["status"] != "running":
@@ -75,6 +77,8 @@ class AgentRunStore:
         summary = {key: run[key] for key in (
             "version", "request_id", "session_id", "started_at", "finished_at", "status"
         )}
+        if "origin" in run:
+            summary["origin"] = run["origin"]
         summary.update(
             response_type=(run["response"] or {}).get("type"),
             step_count=len(run["steps"]),
